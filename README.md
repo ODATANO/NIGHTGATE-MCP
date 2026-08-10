@@ -92,14 +92,17 @@ Or in a project `.mcp.json`:
 | Tool | What it does |
 |---|---|
 | `verify_attestation` | Live-state check that a payload hash is attested in an AttestationVault (crawler-free, optional content-root check, optional cross-network read) |
-| `verify_predicate` | Live-state check that a ZK predicate proof was recorded true on-chain, id-free (plain or field-bound) |
+| `verify_predicate` | Live-state check that a ZK claim was recorded true on-chain, id-free: numeric predicates, `bytesEquality` (+ `expectedDigest`) and `setMembership` (+ `setRoot`) |
 | `verify_predicate_attestation` | Verify a server-issued predicate attestation by its row id |
 | `verify_document` | Verify an anchored document by document id + sha256 |
-| `prepare_document_proof` | Canonicalize a document into payloadHash + Merkle contentRoot + per-field proof inputs (synchronous, NIGHTGATE >= 0.14.0) |
+| `prepare_document_proof` | Canonicalize a document into payloadHash + Merkle contentRoot + per-field proof inputs, numeric and `kind: "bytes"` string fields (synchronous, NIGHTGATE >= 0.14.0; bytes kind >= 0.15.0) |
+| `prepare_membership_set` | Build the canonical allow-list set tree: setRoot for verifiers, inclusion path for provers (synchronous, NIGHTGATE >= 0.15.0) |
 | `attest_agent_output` | Anchor agent-output provenance (canonical envelope, third-party verifiable; async job, NIGHTGATE >= 0.14.0) |
 | `anchor_document` | Anchor a document content hash on-chain (async job) |
 | `prove_field_predicate` | ZK proof that a hidden document field satisfies a threshold, without revealing it (async job) |
-| `prove_field_predicates_batch` | Up to 8 field predicates on one document in ONE transaction (async job) |
+| `prove_field_equality` | ZK proof that a string field carries exactly the value behind a public digest (async job, NIGHTGATE >= 0.15.0) |
+| `prove_field_membership` | ZK proof that a hidden string field is one of a public allow-list, without revealing which (async job, NIGHTGATE >= 0.15.0) |
+| `prove_field_predicates_batch` | Up to 8 field claims on one document in ONE transaction, any mix of numeric / equality / membership (async job) |
 | `grant_disclosure` / `revoke_disclosure` | Attester-only on-chain disclosure ACL (async jobs) |
 | `get_job_status` | Poll an async NIGHTGATE job until succeeded/failed |
 

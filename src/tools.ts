@@ -17,8 +17,62 @@ const merkleSiblings = z.array(hex64('sibling')).length(4)
   .describe('Depth-4 Merkle inclusion path: exactly 4 sibling digests (64 hex each)');
 const merkleDirs = z.array(z.boolean()).length(4)
   .describe('Exactly 4 booleans; true means the current node is the LEFT child');
+const setSiblings = z.array(hex64('setSibling')).length(6)
+  .describe('Depth-6 membership-set path: exactly 6 sibling digests (64 hex each)');
+const setDirs = z.array(z.boolean()).length(6)
+  .describe('Exactly 6 booleans; true means the current node is the LEFT child');
 
 const POLL_HINT = 'Async: returns { jobId, status } immediately; poll get_job_status until succeeded or failed.';
+
+/** Batch claim shapes (NIGHTGATE >= 0.15.0 allows mixing the three kinds). */
+const numericClaim = z.object({
+  predicate: z.enum(['lessOrEqual', 'greaterOrEqual']),
+  fieldKey: hex64('fieldKey'),
+  value: z.string().regex(/^\d+$/, 'value must be a non-negative integer (decimal string)'),
+  siblings: merkleSiblings,
+  dirs: merkleDirs,
+  threshold: scaledInt('threshold'),
+  unit: z.string().optional(),
+});
+const equalityClaim = z.object({
+  predicate: z.literal('bytesEquality'),
+  fieldKey: hex64('fieldKey'),
+  expectedValue: z.string().min(1).optional()
+    .describe('Raw expected string; the server digests the EXACT string'),
+  expectedDigest: hex64('expectedDigest').optional()
+    .describe('blake2b-256 of the exact expected string (64 hex)'),
+  siblings: merkleSiblings,
+  dirs: merkleDirs,
+}).superRefine((c, ctx) => {
+  if (!!c.expectedValue === !!c.expectedDigest) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'pass exactly one of expectedValue / expectedDigest' });
+  }
+});
+const membershipClaim = z.object({
+  predicate: z.literal('setMembership'),
+  fieldKey: hex64('fieldKey'),
+  value: z.string().min(1).optional().describe('Raw member string (witness only)'),
+  valueDigest: hex64('valueDigest').optional().describe('blake2b-256 of the exact member string (witness only)'),
+  allowedValues: z.array(z.string().min(1)).min(1).max(64).optional()
+    .describe('The public allow-list; the server builds the canonical set root + path'),
+  setRoot: hex64('setRoot').optional().describe('Precomputed canonical set root (64 hex)'),
+  setSiblings: setSiblings.optional(),
+  setDirs: setDirs.optional(),
+  siblings: merkleSiblings,
+  dirs: merkleDirs,
+}).superRefine((c, ctx) => {
+  if (!!c.value === !!c.valueDigest) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'pass exactly one of value / valueDigest' });
+  }
+  const hasList = c.allowedValues !== undefined;
+  const hasPath = !!(c.setRoot || c.setSiblings || c.setDirs);
+  if (hasList && hasPath) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'pass either allowedValues or setRoot + setSiblings + setDirs, not both' });
+  }
+  if (!hasList && !(c.setRoot && c.setSiblings && c.setDirs)) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'allowedValues or setRoot + setSiblings + setDirs is required' });
+  }
+});
 
 /**
  * Phase A tool set: crawler-free verification, job polling, and the
@@ -58,31 +112,52 @@ export function registerTools(server: McpServer, client: NightgateClient): void 
     'verify_predicate',
     {
       description:
-        'Verify against LIVE Midnight contract state that a ZK predicate proof (e.g. "hidden value ' +
-        '<= threshold") was recorded true on-chain. Id-free: works for proofs NIGHTGATE never saw. ' +
-        'threshold must be the SAME scaled integer the circuit hashed (scaling mismatch yields ' +
-        'verified:false). Supply fieldKey for a field-bound proof, omit it for a plain one.',
+        'Verify against LIVE Midnight contract state that a ZK claim was recorded true on-chain. ' +
+        'Id-free: works for proofs NIGHTGATE never saw. Numeric predicates (lessOrEqual / ' +
+        'greaterOrEqual) need threshold (the SAME scaled integer the circuit hashed; a scaling ' +
+        'mismatch yields verified:false) and optionally fieldKey for field-bound proofs. ' +
+        'bytesEquality needs fieldKey + expectedDigest; setMembership needs fieldKey + setRoot ' +
+        '(recompute it from the published list via prepare_membership_set).',
       inputSchema: {
         contractAddress: z.string().min(1).describe('AttestationVault contract address'),
         payloadHash: hex64('payloadHash').describe('The attestation payload hash (64 hex)'),
-        predicate: z.enum(['lessOrEqual', 'greaterOrEqual']).describe('Predicate operator'),
-        threshold: scaledInt('threshold').describe('Scaled circuit integer threshold (same scaling the circuit hashed)'),
-        fieldKey: hex64('fieldKey').optional().describe('Optional field key (64 hex) for field-bound proofs'),
+        predicate: z.enum(['lessOrEqual', 'greaterOrEqual', 'bytesEquality', 'setMembership'])
+          .describe('Claim kind'),
+        threshold: scaledInt('threshold').optional()
+          .describe('Numeric predicates only: scaled circuit integer threshold'),
+        fieldKey: hex64('fieldKey').optional()
+          .describe('Field key (64 hex); optional for numeric, required for the bytes kinds'),
+        expectedDigest: hex64('expectedDigest').optional()
+          .describe("bytesEquality only: the public expected value digest"),
+        setRoot: hex64('setRoot').optional()
+          .describe("setMembership only: the canonical allow-list set root"),
         network: z.enum(['preview', 'preprod', 'mainnet']).optional()
           .describe('Read from another network public indexer instead of the configured one'),
         compiledArtifactRef: z.string().optional().describe("Contract artifact ref, defaults to 'attestation-vault'"),
       },
     },
-    run(async (args) =>
-      client.callFunction('verifyPredicateState', {
+    run(async (args) => {
+      if ((args.predicate === 'lessOrEqual' || args.predicate === 'greaterOrEqual') && args.threshold === undefined) {
+        throw new Error('threshold is required for the numeric predicates');
+      }
+      if (args.predicate === 'bytesEquality' && (!args.fieldKey || !args.expectedDigest)) {
+        throw new Error("predicate 'bytesEquality' requires fieldKey and expectedDigest");
+      }
+      if (args.predicate === 'setMembership' && (!args.fieldKey || !args.setRoot)) {
+        throw new Error("predicate 'setMembership' requires fieldKey and setRoot");
+      }
+      return client.callFunction('verifyPredicateState', {
         contractAddress: args.contractAddress,
         payloadHash: args.payloadHash,
         fieldKey: args.fieldKey,
         predicate: args.predicate,
-        threshold: int64(args.threshold),
+        threshold: args.threshold === undefined ? undefined : int64(args.threshold),
+        expectedDigest: args.expectedDigest,
+        setRoot: args.setRoot,
         compiledArtifactRef: args.compiledArtifactRef,
         network: args.network,
-      })),
+      });
+    }),
   );
 
   server.registerTool(
@@ -131,19 +206,24 @@ export function registerTools(server: McpServer, client: NightgateClient): void 
       description:
         'Turn a structured document into everything the proof tools need: canonical JSON and its ' +
         'payloadHash (what anchor_document anchors), a Merkle contentRoot over an ORDERED list of ' +
-        'up to 16 proof fields, and per-field inclusion paths ready for prove_field_predicate. ' +
-        'Keep the field order stable across anchor and proof: it is part of the tree identity. ' +
-        'Compute-only and synchronous, nothing is stored server-side. The returned fields carry ' +
-        'witness material (scaled values): treat as sensitive. Store canonicalDocument at your ' +
-        'storageRef; re-serializing with different key order will not re-hash equal.',
+        'up to 16 proof fields, and per-field inclusion paths ready for prove_field_predicate / ' +
+        'prove_field_equality / prove_field_membership. kind "uint" (default) scales a numeric ' +
+        'value; kind "bytes" (NIGHTGATE >= 0.15.0) enters a STRING field as the digest of the ' +
+        'exact string, feeding the equality/membership proofs. Keep the field order stable across ' +
+        'anchor and proof: it is part of the tree identity. Compute-only and synchronous, nothing ' +
+        'is stored server-side. The returned fields carry witness material (scaled values / value ' +
+        'digests): treat as sensitive. Store canonicalDocument at your storageRef; re-serializing ' +
+        'with different key order will not re-hash equal.',
       inputSchema: {
         document: z.record(z.unknown())
           .describe('The full document as a JSON object; all of it goes into payloadHash'),
         proofFields: z.array(z.object({
           field: z.string().min(1)
             .describe('Dot-separated path into the document (e.g. invoice.total); a literal top-level key containing dots wins'),
+          kind: z.enum(['uint', 'bytes']).optional()
+            .describe("Leaf kind: 'uint' (default, numeric scaled value) or 'bytes' (string value entered as digest of the exact string)"),
           scale: z.number().int().min(1).max(1_000_000_000).optional()
-            .describe('Value scale (default 1000: milli-units)'),
+            .describe("Value scale (default 1000: milli-units); only valid for kind 'uint'"),
         })).min(1).max(16).describe('ORDERED list of fields to make provable (leaf index = position)'),
         compiledArtifactRef: z.string().optional().describe("Contract artifact ref, defaults to 'attestation-vault'"),
       },
@@ -280,26 +360,167 @@ export function registerTools(server: McpServer, client: NightgateClient): void 
   );
 
   server.registerTool(
+    'prepare_membership_set',
+    {
+      description:
+        'Build the canonical depth-6 membership-set tree over a public allow-list (NIGHTGATE ' +
+        '>= 0.15.0). Deterministic rule (digest each exact string, dedupe, sort ascending, pad by ' +
+        'repeating the last member digest), so ANYONE recomputes the same setRoot from the ' +
+        'published list alone: use the root to verify_predicate a setMembership claim. With ' +
+        'value/valueDigest it additionally returns the member inclusion path (witness material, ' +
+        'treat as sensitive); a non-member is a clean 400. Compute-only and synchronous.',
+      inputSchema: {
+        allowedValues: z.array(z.string().min(1)).min(1).max(64)
+          .describe('The public allow-list (up to 64 distinct values)'),
+        value: z.string().min(1).optional()
+          .describe('Optional member string to get the inclusion path for (pass this OR valueDigest)'),
+        valueDigest: hex64('valueDigest').optional()
+          .describe('Optional member digest (64 hex) instead of the raw value'),
+        compiledArtifactRef: z.string().optional().describe("Contract artifact ref, defaults to 'attestation-vault'"),
+      },
+    },
+    run(async (args) => {
+      if (args.value !== undefined && args.valueDigest !== undefined) {
+        throw new Error('pass at most one of value / valueDigest');
+      }
+      return client.callAction('prepareMembershipSet', {
+        allowedValuesJson: JSON.stringify(args.allowedValues),
+        value: args.value,
+        valueDigest: args.valueDigest,
+        compiledArtifactRef: args.compiledArtifactRef,
+      });
+    }),
+  );
+
+  server.registerTool(
+    'prove_field_equality',
+    {
+      description:
+        'Issue a ZK bytes-equality proof (NIGHTGATE >= 0.15.0): the anchored document field ' +
+        'carries EXACTLY the value behind the public expectedDigest. The digest IS the statement, ' +
+        'so this is an authenticity/binding proof, not confidentiality (a low-entropy value\'s ' +
+        'digest is dictionary-guessable). The field must be a kind:"bytes" leaf from ' +
+        'prepare_document_proof; siblings/dirs are its depth-4 inclusion path. If contentRoot is ' +
+        'supplied it is anchored first. ' + POLL_HINT,
+      inputSchema: {
+        payloadHash: hex64('payloadHash').describe('Attestation payload hash (64 hex)'),
+        fieldKey: hex64('fieldKey').describe('Canonical field id (64 hex, public)'),
+        expectedValue: z.string().min(1).optional()
+          .describe('Raw expected string (the server digests the EXACT string; pass this OR expectedDigest)'),
+        expectedDigest: hex64('expectedDigest').optional()
+          .describe('blake2b-256 of the exact expected string (64 hex)'),
+        siblings: merkleSiblings,
+        dirs: merkleDirs,
+        sessionId: z.string().uuid().describe('Wallet session id that signs and submits'),
+        contractAddress: z.string().min(1).describe('AttestationVault deployment'),
+        contentRoot: hex64('contentRoot').optional().describe('Optional Merkle root (64 hex) to anchor first'),
+        compiledArtifactRef: z.string().optional().describe("Contract artifact ref, defaults to 'attestation-vault'"),
+        idempotencyKey: z.string().optional().describe('Dedupes retries'),
+        sponsorSessionId: z.string().uuid().optional().describe('Optional second session that pays the dust fee'),
+      },
+    },
+    run(async (args) => {
+      if (!!args.expectedValue === !!args.expectedDigest) {
+        throw new Error('pass exactly one of expectedValue / expectedDigest');
+      }
+      return client.callAction('issueFieldEqualityAttestation', {
+        payloadHash: args.payloadHash,
+        fieldKey: args.fieldKey,
+        expectedValue: args.expectedValue,
+        expectedDigest: args.expectedDigest,
+        contentRoot: args.contentRoot,
+        siblingsJson: JSON.stringify(args.siblings),
+        dirsJson: JSON.stringify(args.dirs),
+        sessionId: args.sessionId,
+        contractAddress: args.contractAddress,
+        compiledArtifactRef: args.compiledArtifactRef,
+        idempotencyKey: args.idempotencyKey,
+        sponsorSessionId: args.sponsorSessionId,
+      });
+    }),
+  );
+
+  server.registerTool(
+    'prove_field_membership',
+    {
+      description:
+        'Issue a ZK set-membership proof (NIGHTGATE >= 0.15.0): the anchored document field\'s ' +
+        'HIDDEN value is one of a public allow-list, without revealing which one. Supply the ' +
+        'allow-list directly (allowedValues: the server builds the canonical set root + path and ' +
+        'rejects a non-member with 400 BEFORE any proving) or a precomputed setRoot + setSiblings ' +
+        '+ setDirs from prepare_membership_set. The field must be a kind:"bytes" leaf from ' +
+        'prepare_document_proof; value/valueDigest stay witness material, never persisted. If ' +
+        'contentRoot is supplied it is anchored first. ' + POLL_HINT,
+      inputSchema: {
+        payloadHash: hex64('payloadHash').describe('Attestation payload hash (64 hex)'),
+        fieldKey: hex64('fieldKey').describe('Canonical field id (64 hex, public)'),
+        value: z.string().min(1).optional()
+          .describe('Raw member string (witness only; pass this OR valueDigest)'),
+        valueDigest: hex64('valueDigest').optional()
+          .describe('blake2b-256 of the exact member string (witness only)'),
+        allowedValues: z.array(z.string().min(1)).min(1).max(64).optional()
+          .describe('The public allow-list; pass this OR setRoot + setSiblings + setDirs'),
+        setRoot: hex64('setRoot').optional().describe('Precomputed canonical set root (64 hex)'),
+        setSiblings: setSiblings.optional(),
+        setDirs: setDirs.optional(),
+        siblings: merkleSiblings,
+        dirs: merkleDirs,
+        sessionId: z.string().uuid().describe('Wallet session id that signs and submits'),
+        contractAddress: z.string().min(1).describe('AttestationVault deployment'),
+        contentRoot: hex64('contentRoot').optional().describe('Optional Merkle root (64 hex) to anchor first'),
+        compiledArtifactRef: z.string().optional().describe("Contract artifact ref, defaults to 'attestation-vault'"),
+        idempotencyKey: z.string().optional().describe('Dedupes retries'),
+        sponsorSessionId: z.string().uuid().optional().describe('Optional second session that pays the dust fee'),
+      },
+    },
+    run(async (args) => {
+      if (!!args.value === !!args.valueDigest) {
+        throw new Error('pass exactly one of value / valueDigest');
+      }
+      const hasList = args.allowedValues !== undefined;
+      const hasPath = !!(args.setRoot || args.setSiblings || args.setDirs);
+      if (hasList && hasPath) throw new Error('pass either allowedValues or setRoot + setSiblings + setDirs, not both');
+      if (!hasList && !(args.setRoot && args.setSiblings && args.setDirs)) {
+        throw new Error('allowedValues or setRoot + setSiblings + setDirs is required');
+      }
+      return client.callAction('issueFieldMembershipAttestation', {
+        payloadHash: args.payloadHash,
+        fieldKey: args.fieldKey,
+        value: args.value,
+        valueDigest: args.valueDigest,
+        allowedValuesJson: args.allowedValues === undefined ? undefined : JSON.stringify(args.allowedValues),
+        setRoot: args.setRoot,
+        setSiblingsJson: args.setSiblings === undefined ? undefined : JSON.stringify(args.setSiblings),
+        setDirsJson: args.setDirs === undefined ? undefined : JSON.stringify(args.setDirs),
+        contentRoot: args.contentRoot,
+        siblingsJson: JSON.stringify(args.siblings),
+        dirsJson: JSON.stringify(args.dirs),
+        sessionId: args.sessionId,
+        contractAddress: args.contractAddress,
+        compiledArtifactRef: args.compiledArtifactRef,
+        idempotencyKey: args.idempotencyKey,
+        sponsorSessionId: args.sponsorSessionId,
+      });
+    }),
+  );
+
+  server.registerTool(
     'prove_field_predicates_batch',
     {
       description:
-        'Batch variant of prove_field_predicate: prove up to 8 field-bound predicates on ONE ' +
-        'anchored document in ONE transaction (7 if contentRoot is supplied, since the anchor ' +
-        'occupies one call slot). Duplicate claim tuples are dropped server-side. One false ' +
-        'predicate aborts the whole batch at local proving time with zero on-chain effect. After ' +
-        'submission the chain can finalize a PARTIAL_SUCCESS subset; verify per claim via ' +
-        'verify_predicate_attestation instead of assuming all-or-nothing. ' + POLL_HINT,
+        'Batch variant of the field proof tools: prove up to 8 field-bound claims on ONE anchored ' +
+        'document in ONE transaction (7 if contentRoot is supplied, since the anchor occupies one ' +
+        'call slot). Claims may MIX the three kinds (NIGHTGATE >= 0.15.0), discriminated by ' +
+        'predicate: numeric (lessOrEqual/greaterOrEqual), bytesEquality, setMembership. Duplicate ' +
+        'claim tuples are dropped server-side. One false claim aborts the whole batch at local ' +
+        'proving time with zero on-chain effect. After submission the chain can finalize a ' +
+        'PARTIAL_SUCCESS subset; verify per claim via verify_predicate_attestation instead of ' +
+        'assuming all-or-nothing. ' + POLL_HINT,
       inputSchema: {
         payloadHash: hex64('payloadHash').describe('Shared attestation payload hash (64 hex)'),
-        claims: z.array(z.object({
-          fieldKey: hex64('fieldKey'),
-          value: z.string().regex(/^\d+$/, 'value must be a non-negative integer (decimal string)'),
-          siblings: merkleSiblings,
-          dirs: merkleDirs,
-          predicate: z.enum(['lessOrEqual', 'greaterOrEqual']),
-          threshold: scaledInt('threshold'),
-          unit: z.string().optional(),
-        })).min(1).max(8).describe('1-8 claims on the same payload hash'),
+        claims: z.array(z.union([numericClaim, equalityClaim, membershipClaim]))
+          .min(1).max(8)
+          .describe('1-8 claims on the same payload hash; any mix of numeric, bytesEquality and setMembership'),
         sessionId: z.string().uuid().describe('Wallet session id that signs and submits'),
         contractAddress: z.string().min(1).describe('AttestationVault deployment'),
         contentRoot: hex64('contentRoot').optional().describe('Optional Merkle root anchored as first call of the same batch'),
@@ -315,7 +536,8 @@ export function registerTools(server: McpServer, client: NightgateClient): void 
       return client.callAction('issueFieldPredicateAttestationBatch', {
         payloadHash: args.payloadHash,
         contentRoot: args.contentRoot,
-        claimsJson: JSON.stringify(args.claims.map((c) => ({ ...c, threshold: String(c.threshold) }))),
+        claimsJson: JSON.stringify(args.claims.map((c) =>
+          'threshold' in c ? { ...c, threshold: String(c.threshold) } : c)),
         sessionId: args.sessionId,
         contractAddress: args.contractAddress,
         compiledArtifactRef: args.compiledArtifactRef,

@@ -18,9 +18,12 @@ const EXPECTED_TOOLS = [
   'verify_predicate_attestation',
   'verify_document',
   'prepare_document_proof',
+  'prepare_membership_set',
   'attest_agent_output',
   'anchor_document',
   'prove_field_predicate',
+  'prove_field_equality',
+  'prove_field_membership',
   'prove_field_predicates_batch',
   'grant_disclosure',
   'revoke_disclosure',
@@ -79,6 +82,40 @@ const overfull = await client.callTool({
 }).catch((err) => ({ isError: true, content: [{ type: 'text', text: String(err) }] }));
 if (!overfull.isError) fail('batch accepted 8 claims alongside a contentRoot');
 console.log('OK: batch slot rule (anchor + max 7 claims) enforced client-side');
+
+// 0.15.0 kinds: XOR rules must be enforced client-side, valid mixed shapes accepted by the schema.
+const eqBothLanes = await client.callTool({
+  name: 'prove_field_equality',
+  arguments: {
+    payloadHash: 'f'.repeat(64), fieldKey: 'a'.repeat(64),
+    expectedValue: 'NMC811', expectedDigest: 'b'.repeat(64),
+    siblings: claim.siblings, dirs: claim.dirs,
+    sessionId: '00000000-0000-0000-0000-000000000000', contractAddress: 'x',
+  },
+}).catch((err) => ({ isError: true, content: [{ type: 'text', text: String(err) }] }));
+if (!eqBothLanes.isError) fail('prove_field_equality accepted expectedValue AND expectedDigest');
+console.log('OK: equality expectedValue/expectedDigest XOR enforced client-side');
+
+const memNoSet = await client.callTool({
+  name: 'prove_field_membership',
+  arguments: {
+    payloadHash: 'f'.repeat(64), fieldKey: 'a'.repeat(64), value: 'EEA',
+    siblings: claim.siblings, dirs: claim.dirs,
+    sessionId: '00000000-0000-0000-0000-000000000000', contractAddress: 'x',
+  },
+}).catch((err) => ({ isError: true, content: [{ type: 'text', text: String(err) }] }));
+if (!memNoSet.isError) fail('prove_field_membership accepted a claim without allowedValues or a set path');
+console.log('OK: membership allowedValues/setRoot lane rule enforced client-side');
+
+const badVerifyKind = await client.callTool({
+  name: 'verify_predicate',
+  arguments: {
+    contractAddress: 'x', payloadHash: 'f'.repeat(64),
+    predicate: 'setMembership', fieldKey: 'a'.repeat(64),
+  },
+}).catch((err) => ({ isError: true, content: [{ type: 'text', text: String(err) }] }));
+if (!badVerifyKind.isError) fail('verify_predicate accepted setMembership without setRoot');
+console.log('OK: verify_predicate per-kind coordinate rules enforced client-side');
 
 if (process.env.NIGHTGATE_LIVE === '1') {
   const contractAddress = process.env.NIGHTGATE_TEST_CONTRACT;
