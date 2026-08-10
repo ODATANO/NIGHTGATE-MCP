@@ -1,5 +1,12 @@
 # @odatano/nightgate-mcp
 
+[![npm](https://img.shields.io/npm/v/@odatano/nightgate-mcp)](https://www.npmjs.com/package/@odatano/nightgate-mcp)
+[![npm downloads](https://img.shields.io/npm/dt/@odatano/nightgate-mcp?logo=npm&label=downloads&color=blue)](https://www.npmjs.com/package/@odatano/nightgate-mcp)
+[![NIGHTGATE](https://img.shields.io/badge/NIGHTGATE-%3E%3D%200.15.0-4b0082)](https://www.npmjs.com/package/@odatano/nightgate)
+[![MCP](https://img.shields.io/badge/MCP-server-2ea44f)](https://modelcontextprotocol.io/)
+[![Node](https://img.shields.io/badge/node-%3E%3D%2020-brightgreen?logo=node.js)](https://nodejs.org/)
+[![License](https://img.shields.io/badge/license-Apache--2.0-yellow)](LICENSE)
+
 MCP server that lets AI agents use [NIGHTGATE](https://github.com/ODATANO/NIGHTGATE),
 the Midnight blockchain attestation layer: anchor documents, prove
 zero-knowledge predicates over hidden fields, manage disclosure grants,
@@ -9,7 +16,8 @@ Wallet lifecycle (connect, send, deploy) is deliberately not exposed.
 ## Requirements
 
 - Node.js >= 20
-- A running NIGHTGATE instance (>= 0.14.0 for the full tool set)
+- A running NIGHTGATE instance (>= 0.15.0 for the full tool set; 0.14.0
+  works without the equality/membership tools)
 
 ## Getting a NIGHTGATE instance
 
