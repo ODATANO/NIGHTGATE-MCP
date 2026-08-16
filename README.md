@@ -2,7 +2,7 @@
 
 [![npm](https://img.shields.io/npm/v/@odatano/nightgate-mcp)](https://www.npmjs.com/package/@odatano/nightgate-mcp)
 [![npm downloads](https://img.shields.io/npm/dt/@odatano/nightgate-mcp?logo=npm&label=downloads&color=blue)](https://www.npmjs.com/package/@odatano/nightgate-mcp)
-[![NIGHTGATE](https://img.shields.io/badge/NIGHTGATE-%3E%3D%200.15.0-4b0082)](https://www.npmjs.com/package/@odatano/nightgate)
+[![NIGHTGATE](https://img.shields.io/badge/NIGHTGATE-%3E%3D%200.16.0-4b0082)](https://www.npmjs.com/package/@odatano/nightgate)
 [![MCP](https://img.shields.io/badge/MCP-server-2ea44f)](https://modelcontextprotocol.io/)
 [![Node](https://img.shields.io/badge/node-%3E%3D%2020-brightgreen?logo=node.js)](https://nodejs.org/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-yellow)](LICENSE)
@@ -16,8 +16,24 @@ Wallet lifecycle (connect, send, deploy) is deliberately not exposed.
 ## Requirements
 
 - Node.js >= 20
-- A running NIGHTGATE instance (>= 0.15.0 for the full tool set; 0.14.0
-  works without the equality/membership tools)
+- A running NIGHTGATE instance, see the compatibility matrix below
+
+## Compatibility
+
+Pick the MCP line that matches your NIGHTGATE server. The pairing is not
+cosmetic: from NIGHTGATE 0.16.0 on, content-tree leaves are SALTED, so every
+field proof must carry its slot salt. An older MCP omits it and the server
+rejects the call with 400.
+
+| MCP | NIGHTGATE | Notes |
+|---|---|---|
+| **0.3.x** | **>= 0.16.0** (0.16.2 recommended) | Current. Adds the cross-root proofs, guarded anchoring and schema ids, and sends the per-field salts the salted leaves require. Does NOT work against 0.15.x and older, which know no salt parameters. |
+| 0.2.x | 0.15.x | Bytes equality and set membership on unsalted leaves. Against 0.16.0 and newer every field proof fails with "fieldSalt is required". |
+| 0.1.x | 0.14.x | Anchoring, numeric field predicates, disclosure, agent provenance. |
+
+The verification tools are the exception: they only read live contract state
+and keep working across the whole range, they simply cannot express the
+newer claim kinds on an older server.
 
 ## Getting a NIGHTGATE instance
 
@@ -100,17 +116,21 @@ Or in a project `.mcp.json`:
 | Tool | What it does |
 |---|---|
 | `verify_attestation` | Live-state check that a payload hash is attested in an AttestationVault (crawler-free, optional content-root check, optional cross-network read) |
-| `verify_predicate` | Live-state check that a ZK claim was recorded true on-chain, id-free: numeric predicates, `bytesEquality` (+ `expectedDigest`) and `setMembership` (+ `setRoot`) |
+| `verify_predicate` | Live-state check that a ZK claim was recorded true on-chain, id-free: numeric predicates, `bytesEquality` (+ `expectedDigest`), `setMembership` (+ `setRoot`) and the cross-root kinds `documentIntegrity` / `documentDiff` (+ `payloadHashB`) |
 | `verify_predicate_attestation` | Verify a server-issued predicate attestation by its row id |
 | `verify_document` | Verify an anchored document by document id + sha256 |
-| `prepare_document_proof` | Canonicalize a document into payloadHash + Merkle contentRoot + per-field proof inputs, numeric and `kind: "bytes"` string fields (synchronous, NIGHTGATE >= 0.14.0; bytes kind >= 0.15.0) |
-| `prepare_membership_set` | Build the canonical allow-list set tree: setRoot for verifiers, inclusion path for provers (synchronous, NIGHTGATE >= 0.15.0) |
+| `prepare_document_proof` | Canonicalize a document into payloadHash + salted Merkle contentRoot + schemaId + per-field proof inputs (incl. each slot salt) + the full `opening` the cross-root proofs need (synchronous) |
+| `prepare_membership_set` | Build the canonical allow-list set tree: setRoot for verifiers, inclusion path for provers (synchronous) |
 | `attest_agent_output` | Anchor agent-output provenance (canonical envelope, third-party verifiable; async job, NIGHTGATE >= 0.14.0) |
-| `anchor_document` | Anchor a document content hash on-chain (async job) |
+| `anchor_document` | Anchor a document content hash on-chain; with a `nonce` it is the guarded reveal that reclaims a front-run hash (async job) |
 | `prove_field_predicate` | ZK proof that a hidden document field satisfies a threshold, without revealing it (async job) |
-| `prove_field_equality` | ZK proof that a string field carries exactly the value behind a public digest (async job, NIGHTGATE >= 0.15.0) |
-| `prove_field_membership` | ZK proof that a hidden string field is one of a public allow-list, without revealing which (async job, NIGHTGATE >= 0.15.0) |
-| `prove_field_predicates_batch` | Up to 8 field claims on one document in ONE transaction, any mix of numeric / equality / membership (async job) |
+| `prove_field_equality` | ZK proof that a string field carries exactly the value behind a public digest (async job) |
+| `prove_field_membership` | ZK proof that a hidden string field is one of a public allow-list, without revealing which (async job) |
+| `prove_field_predicates_batch` | Up to 8 claims on one document in ONE transaction, any mix of numeric / equality / membership / cross-root kinds (async job) |
+| `prove_document_integrity` | ZK proof that a second document differs from the anchored one ONLY in a public slot mask, values hidden (async job) |
+| `prove_document_diff` | ZK proof that two anchored documents differ at >= k of 16 slots, without revealing which (async job) |
+| `prepare_anchor_commitment` | Compute the commitment + secret nonce for guarded anchoring (synchronous) |
+| `commit_document_anchor` | Record that commitment on-chain, so a mempool observer cannot front-run the later reveal (async job) |
 | `grant_disclosure` / `revoke_disclosure` | Attester-only on-chain disclosure ACL (async jobs) |
 | `get_job_status` | Poll an async NIGHTGATE job until succeeded/failed |
 

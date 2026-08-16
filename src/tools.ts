@@ -24,11 +24,39 @@ const setDirs = z.array(z.boolean()).length(6)
 
 const POLL_HINT = 'Async: returns { jobId, status } immediately; poll get_job_status until succeeded or failed.';
 
-/** Batch claim shapes (NIGHTGATE >= 0.15.0 allows mixing the three kinds). */
+/**
+ * Per-slot salt of a proof field. Content-tree leaves are SALTED, so every
+ * single-field proof needs the slot's salt from prepare_document_proof
+ * (field `salt`; batch claims carry it as `salt` too). Witness material.
+ */
+const fieldSalt = hex64('fieldSalt')
+  .describe('Per-slot salt of this field, from prepare_document_proof (fields[].salt). Witness material, never publish');
+
+/** The shared 16-slot schema descriptor list from prepare_document_proof. */
+const schemaSlots = z.array(z.object({
+  fieldKey: hex64('schema.fieldKey'),
+  kind: z.union([z.literal(0), z.literal(1), z.literal(2)])
+    .describe('0 = uint, 1 = bytes, 2 = padding'),
+  scale: z.union([z.string(), z.number()]).describe("Off-chain scaling of uint slots, '0' otherwise"),
+})).length(16)
+  .describe('The 16-entry schema descriptor list returned by prepare_document_proof as `schema`. Both documents of a comparison MUST use the same one');
+
+/** One document's full opening (salt seed + 16 slot values). */
+const documentOpening = z.object({
+  saltSeed: hex64('saltSeed'),
+  slots: z.array(z.object({
+    present: z.boolean(),
+    value: z.string().optional().describe('uint slots: the scaled integer'),
+    valueDigest: hex64('slot.valueDigest').optional().describe('bytes slots: the value digest'),
+  })).length(16),
+}).describe('A document\'s complete opening from prepare_document_proof (`opening`): salt seed plus all 16 slot values. WITNESS material for the whole document, never publish');
+
+/** Batch claim shapes; claims may mix all kinds in one transaction. */
 const numericClaim = z.object({
   predicate: z.enum(['lessOrEqual', 'greaterOrEqual']),
   fieldKey: hex64('fieldKey'),
   value: z.string().regex(/^\d+$/, 'value must be a non-negative integer (decimal string)'),
+  salt: fieldSalt,
   siblings: merkleSiblings,
   dirs: merkleDirs,
   threshold: scaledInt('threshold'),
@@ -41,6 +69,7 @@ const equalityClaim = z.object({
     .describe('Raw expected string; the server digests the EXACT string'),
   expectedDigest: hex64('expectedDigest').optional()
     .describe('blake2b-256 of the exact expected string (64 hex)'),
+  salt: fieldSalt,
   siblings: merkleSiblings,
   dirs: merkleDirs,
 }).superRefine((c, ctx) => {
@@ -58,6 +87,7 @@ const membershipClaim = z.object({
   setRoot: hex64('setRoot').optional().describe('Precomputed canonical set root (64 hex)'),
   setSiblings: setSiblings.optional(),
   setDirs: setDirs.optional(),
+  salt: fieldSalt,
   siblings: merkleSiblings,
   dirs: merkleDirs,
 }).superRefine((c, ctx) => {
@@ -72,6 +102,25 @@ const membershipClaim = z.object({
   if (!hasList && !(c.setRoot && c.setSiblings && c.setDirs)) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'allowedValues or setRoot + setSiblings + setDirs is required' });
   }
+});
+
+/** Cross-root claim shapes: they relate the batch payload hash (document A) to a second document. */
+const documentIntegrityClaim = z.object({
+  predicate: z.literal('documentIntegrity'),
+  payloadHashB: hex64('payloadHashB').describe('The second document (A is the batch payloadHash)'),
+  allowedMask: z.number().int().min(0).max(0xfffe)
+    .describe('Packed 16-bit mask, bit i = slot i MAY differ. Must leave at least one real schema slot constrained, otherwise the claim is vacuous and rejected'),
+  schema: schemaSlots,
+  openingA: documentOpening,
+  openingB: documentOpening,
+});
+const documentDiffClaim = z.object({
+  predicate: z.literal('documentDiff'),
+  payloadHashB: hex64('payloadHashB').describe('The second document (A is the batch payloadHash)'),
+  k: z.number().int().min(1).max(16).describe('Minimum number of differing slots to prove'),
+  schema: schemaSlots,
+  openingA: documentOpening,
+  openingB: documentOpening,
 });
 
 /**
@@ -93,6 +142,8 @@ export function registerTools(server: McpServer, client: NightgateClient): void 
         contractAddress: z.string().min(1).describe('AttestationVault contract address'),
         payloadHash: hex64('payloadHash').describe('The attested payload hash (sha256, 64 hex)'),
         contentRoot: hex64('contentRoot').optional().describe('Optional anchored content root to check (64 hex)'),
+        schemaId: hex64('schemaId').optional()
+          .describe('Optional anchored schema id to check; the result reports schemaOk, so an examiner can pin the canonical field list'),
         network: z.enum(['preview', 'preprod', 'mainnet']).optional()
           .describe('Read from another network public indexer instead of the configured one'),
         compiledArtifactRef: z.string().optional().describe("Contract artifact ref, defaults to 'attestation-vault'"),
@@ -103,6 +154,7 @@ export function registerTools(server: McpServer, client: NightgateClient): void 
         contractAddress: args.contractAddress,
         payloadHash: args.payloadHash,
         contentRoot: args.contentRoot,
+        schemaId: args.schemaId,
         compiledArtifactRef: args.compiledArtifactRef,
         network: args.network,
       })),
@@ -121,16 +173,22 @@ export function registerTools(server: McpServer, client: NightgateClient): void 
       inputSchema: {
         contractAddress: z.string().min(1).describe('AttestationVault contract address'),
         payloadHash: hex64('payloadHash').describe('The attestation payload hash (64 hex)'),
-        predicate: z.enum(['lessOrEqual', 'greaterOrEqual', 'bytesEquality', 'setMembership'])
-          .describe('Claim kind'),
+        predicate: z.enum(['lessOrEqual', 'greaterOrEqual', 'bytesEquality', 'setMembership',
+          'documentIntegrity', 'documentDiff']).describe('Claim kind'),
         threshold: scaledInt('threshold').optional()
           .describe('Numeric predicates only: scaled circuit integer threshold'),
         fieldKey: hex64('fieldKey').optional()
-          .describe('Field key (64 hex); optional for numeric, required for the bytes kinds'),
+          .describe('Field key (64 hex); required for the numeric and bytes kinds, unused for the cross-root kinds'),
         expectedDigest: hex64('expectedDigest').optional()
           .describe("bytesEquality only: the public expected value digest"),
         setRoot: hex64('setRoot').optional()
           .describe("setMembership only: the canonical allow-list set root"),
+        payloadHashB: hex64('payloadHashB').optional()
+          .describe('Cross-root kinds: the second document. (A, B) order is part of the claim, query it as proven'),
+        allowedMask: z.number().int().min(0).max(0xffff).optional()
+          .describe('documentIntegrity only: the packed 16-bit mask that was proven'),
+        k: z.number().int().min(1).max(16).optional()
+          .describe('documentDiff only: the k that was proven'),
         network: z.enum(['preview', 'preprod', 'mainnet']).optional()
           .describe('Read from another network public indexer instead of the configured one'),
         compiledArtifactRef: z.string().optional().describe("Contract artifact ref, defaults to 'attestation-vault'"),
@@ -146,6 +204,12 @@ export function registerTools(server: McpServer, client: NightgateClient): void 
       if (args.predicate === 'setMembership' && (!args.fieldKey || !args.setRoot)) {
         throw new Error("predicate 'setMembership' requires fieldKey and setRoot");
       }
+      if (args.predicate === 'documentIntegrity' && (!args.payloadHashB || args.allowedMask === undefined)) {
+        throw new Error("predicate 'documentIntegrity' requires payloadHashB and allowedMask");
+      }
+      if (args.predicate === 'documentDiff' && (!args.payloadHashB || args.k === undefined)) {
+        throw new Error("predicate 'documentDiff' requires payloadHashB and k");
+      }
       return client.callFunction('verifyPredicateState', {
         contractAddress: args.contractAddress,
         payloadHash: args.payloadHash,
@@ -154,6 +218,9 @@ export function registerTools(server: McpServer, client: NightgateClient): void 
         threshold: args.threshold === undefined ? undefined : int64(args.threshold),
         expectedDigest: args.expectedDigest,
         setRoot: args.setRoot,
+        payloadHashB: args.payloadHashB,
+        allowedMask: args.allowedMask,
+        k: args.k,
         compiledArtifactRef: args.compiledArtifactRef,
         network: args.network,
       });
@@ -208,12 +275,17 @@ export function registerTools(server: McpServer, client: NightgateClient): void 
         'payloadHash (what anchor_document anchors), a Merkle contentRoot over an ORDERED list of ' +
         'up to 16 proof fields, and per-field inclusion paths ready for prove_field_predicate / ' +
         'prove_field_equality / prove_field_membership. kind "uint" (default) scales a numeric ' +
-        'value; kind "bytes" (NIGHTGATE >= 0.15.0) enters a STRING field as the digest of the ' +
+        'value; kind "bytes" (NIGHTGATE >= 0.16.0) enters a STRING field as the digest of the ' +
         'exact string, feeding the equality/membership proofs. Keep the field order stable across ' +
         'anchor and proof: it is part of the tree identity. Compute-only and synchronous, nothing ' +
-        'is stored server-side. The returned fields carry witness material (scaled values / value ' +
-        'digests): treat as sensitive. Store canonicalDocument at your storageRef; re-serializing ' +
-        'with different key order will not re-hash equal.',
+        'is stored server-side. Leaves are SALTED: the response carries a per-field `salt` (feed it ' +
+        'back as fieldSalt / claim salt), the full `opening` (salt seed + all 16 slots, needed for ' +
+        'the cross-root proofs) and `schemaId` (anchor it alongside the root). STORE the opening ' +
+        'with the document: losing the salt seed makes the anchored root unprovable, publishing it ' +
+        'makes leaf hashes guessable. Pass saltSeed to reproduce an EXISTING anchored root ' +
+        'byte-for-byte; omit it for a fresh document. The returned fields carry witness material ' +
+        '(scaled values / digests / salts): treat as sensitive. Store canonicalDocument at your ' +
+        'storageRef; re-serializing with different key order will not re-hash equal.',
       inputSchema: {
         document: z.record(z.unknown())
           .describe('The full document as a JSON object; all of it goes into payloadHash'),
@@ -225,6 +297,8 @@ export function registerTools(server: McpServer, client: NightgateClient): void 
           scale: z.number().int().min(1).max(1_000_000_000).optional()
             .describe("Value scale (default 1000: milli-units); only valid for kind 'uint'"),
         })).min(1).max(16).describe('ORDERED list of fields to make provable (leaf index = position)'),
+        saltSeed: hex64('saltSeed').optional()
+          .describe('Reuse a stored salt seed to reproduce an already-anchored root; omit for a fresh document (random seed)'),
         compiledArtifactRef: z.string().optional().describe("Contract artifact ref, defaults to 'attestation-vault'"),
       },
     },
@@ -232,6 +306,7 @@ export function registerTools(server: McpServer, client: NightgateClient): void 
       client.callAction('prepareDocumentProof', {
         documentJson: JSON.stringify(args.document),
         proofFieldsJson: JSON.stringify(args.proofFields),
+        saltSeed: args.saltSeed,
         compiledArtifactRef: args.compiledArtifactRef,
       })),
   );
@@ -282,7 +357,10 @@ export function registerTools(server: McpServer, client: NightgateClient): void 
       description:
         'Anchor a document content hash on the Midnight chain via the AttestationVault attest ' +
         'circuit. Commits only the sha256 + public metadata; you are responsible for storing the ' +
-        'actual bytes at storageRef. Attestation is first-come-first-served per hash. ' + POLL_HINT +
+        'actual bytes at storageRef. Plain attestation is first-come-first-served per hash, so a ' +
+        'mempool observer can front-run a visible hash: for a hash that is secret until anchoring, ' +
+        'use prepare_anchor_commitment + commit_document_anchor first and pass the nonce here, ' +
+        'which turns this call into the guarded REVEAL and reclaims a front-run hash. ' + POLL_HINT +
         ' Also returns documentId for verify_document.',
       inputSchema: {
         sha256: hex64('sha256').describe('sha256 of the document content (64 hex), becomes the on-chain payload hash'),
@@ -292,6 +370,8 @@ export function registerTools(server: McpServer, client: NightgateClient): void 
         contentType: z.string().optional().describe('MIME type, informational'),
         size: z.number().int().nonnegative().optional().describe('Content size in bytes, informational'),
         metadata: z.record(z.unknown()).optional().describe('Public metadata object; its hash is anchored alongside'),
+        nonce: hex64('nonce').optional()
+          .describe('Guarded REVEAL: the secret nonce from prepare_anchor_commitment, after commit_document_anchor finalized. Same sha256 and metadata as the commitment'),
         compiledArtifactRef: z.string().optional().describe("Contract artifact ref, defaults to 'attestation-vault'"),
         idempotencyKey: z.string().optional().describe('Dedupes retries of the same anchor request'),
         sponsorSessionId: z.string().uuid().optional().describe('Optional second session that pays the dust fee'),
@@ -304,6 +384,7 @@ export function registerTools(server: McpServer, client: NightgateClient): void 
         size: args.size,
         storageRef: args.storageRef,
         metadata: args.metadata === undefined ? undefined : JSON.stringify(args.metadata),
+        nonce: args.nonce,
         sessionId: args.sessionId,
         contractAddress: args.contractAddress,
         compiledArtifactRef: args.compiledArtifactRef,
@@ -327,6 +408,7 @@ export function registerTools(server: McpServer, client: NightgateClient): void 
         fieldKey: hex64('fieldKey').describe('Canonical field id (64 hex, public)'),
         value: z.string().regex(/^\d+$/, 'value must be a non-negative integer (decimal string)')
           .describe('Scaled integer field value (witness only, never persisted)'),
+        fieldSalt,
         siblings: merkleSiblings,
         dirs: merkleDirs,
         predicate: z.enum(['lessOrEqual', 'greaterOrEqual']).describe('Predicate operator'),
@@ -334,6 +416,7 @@ export function registerTools(server: McpServer, client: NightgateClient): void 
         sessionId: z.string().uuid().describe('Wallet session id that signs and submits'),
         contractAddress: z.string().min(1).describe('AttestationVault deployment'),
         contentRoot: hex64('contentRoot').optional().describe('Optional Merkle root (64 hex) to anchor first'),
+        schemaId: hex64('schemaId').optional().describe('Schema id of the field list, required whenever contentRoot is supplied'),
         unit: z.string().optional().describe('Informational unit, e.g. kWh'),
         compiledArtifactRef: z.string().optional().describe("Contract artifact ref, defaults to 'attestation-vault'"),
         idempotencyKey: z.string().optional().describe('Dedupes retries'),
@@ -345,7 +428,9 @@ export function registerTools(server: McpServer, client: NightgateClient): void 
         payloadHash: args.payloadHash,
         fieldKey: args.fieldKey,
         value: args.value,
+        fieldSalt: args.fieldSalt,
         contentRoot: args.contentRoot,
+        schemaId: args.schemaId,
         siblingsJson: JSON.stringify(args.siblings),
         dirsJson: JSON.stringify(args.dirs),
         predicate: args.predicate,
@@ -364,7 +449,7 @@ export function registerTools(server: McpServer, client: NightgateClient): void 
     {
       description:
         'Build the canonical depth-6 membership-set tree over a public allow-list (NIGHTGATE ' +
-        '>= 0.15.0). Deterministic rule (digest each exact string, dedupe, sort ascending, pad by ' +
+        '>= 0.16.0). Deterministic rule (digest each exact string, dedupe, sort ascending, pad by ' +
         'repeating the last member digest), so ANYONE recomputes the same setRoot from the ' +
         'published list alone: use the root to verify_predicate a setMembership claim. With ' +
         'value/valueDigest it additionally returns the member inclusion path (witness material, ' +
@@ -396,7 +481,7 @@ export function registerTools(server: McpServer, client: NightgateClient): void 
     'prove_field_equality',
     {
       description:
-        'Issue a ZK bytes-equality proof (NIGHTGATE >= 0.15.0): the anchored document field ' +
+        'Issue a ZK bytes-equality proof (NIGHTGATE >= 0.16.0): the anchored document field ' +
         'carries EXACTLY the value behind the public expectedDigest. The digest IS the statement, ' +
         'so this is an authenticity/binding proof, not confidentiality (a low-entropy value\'s ' +
         'digest is dictionary-guessable). The field must be a kind:"bytes" leaf from ' +
@@ -409,11 +494,13 @@ export function registerTools(server: McpServer, client: NightgateClient): void 
           .describe('Raw expected string (the server digests the EXACT string; pass this OR expectedDigest)'),
         expectedDigest: hex64('expectedDigest').optional()
           .describe('blake2b-256 of the exact expected string (64 hex)'),
+        fieldSalt,
         siblings: merkleSiblings,
         dirs: merkleDirs,
         sessionId: z.string().uuid().describe('Wallet session id that signs and submits'),
         contractAddress: z.string().min(1).describe('AttestationVault deployment'),
         contentRoot: hex64('contentRoot').optional().describe('Optional Merkle root (64 hex) to anchor first'),
+        schemaId: hex64('schemaId').optional().describe('Schema id of the field list, required whenever contentRoot is supplied'),
         compiledArtifactRef: z.string().optional().describe("Contract artifact ref, defaults to 'attestation-vault'"),
         idempotencyKey: z.string().optional().describe('Dedupes retries'),
         sponsorSessionId: z.string().uuid().optional().describe('Optional second session that pays the dust fee'),
@@ -428,7 +515,9 @@ export function registerTools(server: McpServer, client: NightgateClient): void 
         fieldKey: args.fieldKey,
         expectedValue: args.expectedValue,
         expectedDigest: args.expectedDigest,
+        fieldSalt: args.fieldSalt,
         contentRoot: args.contentRoot,
+        schemaId: args.schemaId,
         siblingsJson: JSON.stringify(args.siblings),
         dirsJson: JSON.stringify(args.dirs),
         sessionId: args.sessionId,
@@ -444,7 +533,7 @@ export function registerTools(server: McpServer, client: NightgateClient): void 
     'prove_field_membership',
     {
       description:
-        'Issue a ZK set-membership proof (NIGHTGATE >= 0.15.0): the anchored document field\'s ' +
+        'Issue a ZK set-membership proof (NIGHTGATE >= 0.16.0): the anchored document field\'s ' +
         'HIDDEN value is one of a public allow-list, without revealing which one. Supply the ' +
         'allow-list directly (allowedValues: the server builds the canonical set root + path and ' +
         'rejects a non-member with 400 BEFORE any proving) or a precomputed setRoot + setSiblings ' +
@@ -463,11 +552,13 @@ export function registerTools(server: McpServer, client: NightgateClient): void 
         setRoot: hex64('setRoot').optional().describe('Precomputed canonical set root (64 hex)'),
         setSiblings: setSiblings.optional(),
         setDirs: setDirs.optional(),
+        fieldSalt,
         siblings: merkleSiblings,
         dirs: merkleDirs,
         sessionId: z.string().uuid().describe('Wallet session id that signs and submits'),
         contractAddress: z.string().min(1).describe('AttestationVault deployment'),
         contentRoot: hex64('contentRoot').optional().describe('Optional Merkle root (64 hex) to anchor first'),
+        schemaId: hex64('schemaId').optional().describe('Schema id of the field list, required whenever contentRoot is supplied'),
         compiledArtifactRef: z.string().optional().describe("Contract artifact ref, defaults to 'attestation-vault'"),
         idempotencyKey: z.string().optional().describe('Dedupes retries'),
         sponsorSessionId: z.string().uuid().optional().describe('Optional second session that pays the dust fee'),
@@ -492,7 +583,9 @@ export function registerTools(server: McpServer, client: NightgateClient): void 
         setRoot: args.setRoot,
         setSiblingsJson: args.setSiblings === undefined ? undefined : JSON.stringify(args.setSiblings),
         setDirsJson: args.setDirs === undefined ? undefined : JSON.stringify(args.setDirs),
+        fieldSalt: args.fieldSalt,
         contentRoot: args.contentRoot,
+        schemaId: args.schemaId,
         siblingsJson: JSON.stringify(args.siblings),
         dirsJson: JSON.stringify(args.dirs),
         sessionId: args.sessionId,
@@ -510,20 +603,21 @@ export function registerTools(server: McpServer, client: NightgateClient): void 
       description:
         'Batch variant of the field proof tools: prove up to 8 field-bound claims on ONE anchored ' +
         'document in ONE transaction (7 if contentRoot is supplied, since the anchor occupies one ' +
-        'call slot). Claims may MIX the three kinds (NIGHTGATE >= 0.15.0), discriminated by ' +
+        'call slot). Claims may MIX the three kinds (NIGHTGATE >= 0.16.0), discriminated by ' +
         'predicate: numeric (lessOrEqual/greaterOrEqual), bytesEquality, setMembership. Duplicate ' +
         'claim tuples are dropped server-side. One false claim aborts the whole batch at local ' +
         'proving time with zero on-chain effect. After submission the chain can finalize a ' +
         'PARTIAL_SUCCESS subset; verify per claim via verify_predicate_attestation instead of ' +
         'assuming all-or-nothing. ' + POLL_HINT,
       inputSchema: {
-        payloadHash: hex64('payloadHash').describe('Shared attestation payload hash (64 hex)'),
-        claims: z.array(z.union([numericClaim, equalityClaim, membershipClaim]))
+        payloadHash: hex64('payloadHash').describe('Shared attestation payload hash; also document A of any cross-root claim (64 hex)'),
+        claims: z.array(z.union([numericClaim, equalityClaim, membershipClaim, documentIntegrityClaim, documentDiffClaim]))
           .min(1).max(8)
-          .describe('1-8 claims on the same payload hash; any mix of numeric, bytesEquality and setMembership'),
+          .describe('1-8 claims on the same payload hash; any mix of numeric, bytesEquality, setMembership, documentIntegrity and documentDiff'),
         sessionId: z.string().uuid().describe('Wallet session id that signs and submits'),
         contractAddress: z.string().min(1).describe('AttestationVault deployment'),
         contentRoot: hex64('contentRoot').optional().describe('Optional Merkle root anchored as first call of the same batch'),
+        schemaId: hex64('schemaId').optional().describe('Schema id of the field list, required whenever contentRoot is supplied'),
         compiledArtifactRef: z.string().optional().describe("Contract artifact ref, defaults to 'attestation-vault'"),
         idempotencyKey: z.string().optional().describe('Dedupes retries'),
         sponsorSessionId: z.string().uuid().optional().describe('Optional second session that pays the dust fee'),
@@ -536,6 +630,7 @@ export function registerTools(server: McpServer, client: NightgateClient): void 
       return client.callAction('issueFieldPredicateAttestationBatch', {
         payloadHash: args.payloadHash,
         contentRoot: args.contentRoot,
+        schemaId: args.schemaId,
         claimsJson: JSON.stringify(args.claims.map((c) =>
           'threshold' in c ? { ...c, threshold: String(c.threshold) } : c)),
         sessionId: args.sessionId,
@@ -545,6 +640,154 @@ export function registerTools(server: McpServer, client: NightgateClient): void 
         sponsorSessionId: args.sponsorSessionId,
       });
     }),
+  );
+
+  server.registerTool(
+    'prove_document_integrity',
+    {
+      description:
+        'Prove that document B differs from anchored document A ONLY in the slots flagged by a ' +
+        'public 16-bit mask, values hidden: the version-integrity claim ("v2 changed nothing ' +
+        'outside the allowed fields"). Both documents must be anchored, prepared with the SAME ' +
+        'ordered field list (identical schemaId) and you need BOTH full openings, which is why ' +
+        'this only works for a party that holds both documents. A mask that frees every real slot ' +
+        'is vacuous and rejected; a slot that changed, appeared or disappeared outside the mask ' +
+        'fails at local proving time with zero on-chain effect. ' + POLL_HINT,
+      inputSchema: {
+        payloadHashA: hex64('payloadHashA').describe('Anchored document A (64 hex)'),
+        payloadHashB: hex64('payloadHashB').describe('Anchored document B; must differ from A'),
+        allowedMask: z.number().int().min(0).max(0xfffe)
+          .describe('Packed 16-bit mask, bit i = slot i MAY differ. At least one real schema slot must stay constrained'),
+        schema: schemaSlots,
+        openingA: documentOpening,
+        openingB: documentOpening,
+        sessionId: z.string().uuid().describe('Wallet session id that signs and submits'),
+        contractAddress: z.string().min(1).describe('AttestationVault deployment'),
+        contentRootA: hex64('contentRootA').optional().describe('Optional: anchor A\'s root in the same flow'),
+        contentRootB: hex64('contentRootB').optional().describe('Optional: anchor B\'s root in the same flow'),
+        schemaId: hex64('schemaId').optional().describe('Shared schema id, required whenever a contentRoot is supplied'),
+        compiledArtifactRef: z.string().optional().describe("Contract artifact ref, defaults to 'attestation-vault'"),
+        idempotencyKey: z.string().optional().describe('Dedupes retries'),
+        sponsorSessionId: z.string().uuid().optional().describe('Optional second session that pays the dust fee'),
+      },
+    },
+    run(async (args) =>
+      client.callAction('issueDocumentIntegrityAttestation', {
+        payloadHashA: args.payloadHashA,
+        payloadHashB: args.payloadHashB,
+        allowedMask: args.allowedMask,
+        schemaJson: JSON.stringify(args.schema),
+        openingAJson: JSON.stringify(args.openingA),
+        openingBJson: JSON.stringify(args.openingB),
+        contentRootA: args.contentRootA,
+        contentRootB: args.contentRootB,
+        schemaId: args.schemaId,
+        sessionId: args.sessionId,
+        contractAddress: args.contractAddress,
+        compiledArtifactRef: args.compiledArtifactRef,
+        idempotencyKey: args.idempotencyKey,
+        sponsorSessionId: args.sponsorSessionId,
+      })),
+  );
+
+  server.registerTool(
+    'prove_document_diff',
+    {
+      description:
+        'Prove that at least k of the 16 aligned slots differ between two anchored documents, ' +
+        'without revealing which slots or what values: the distinctness claim (k=1 is "provably ' +
+        'not the same document"). Same requirements as prove_document_integrity: identical field ' +
+        'list, both openings in hand. A difference is a value change or a field that appeared or ' +
+        'disappeared; both-empty slots compare equal and padding never counts. k above the real ' +
+        'count fails at local proving time with zero on-chain effect. ' + POLL_HINT,
+      inputSchema: {
+        payloadHashA: hex64('payloadHashA').describe('Anchored document A (64 hex)'),
+        payloadHashB: hex64('payloadHashB').describe('Anchored document B; must differ from A'),
+        k: z.number().int().min(1).max(16).describe('Minimum number of differing slots to prove'),
+        schema: schemaSlots,
+        openingA: documentOpening,
+        openingB: documentOpening,
+        sessionId: z.string().uuid().describe('Wallet session id that signs and submits'),
+        contractAddress: z.string().min(1).describe('AttestationVault deployment'),
+        contentRootA: hex64('contentRootA').optional().describe('Optional: anchor A\'s root in the same flow'),
+        contentRootB: hex64('contentRootB').optional().describe('Optional: anchor B\'s root in the same flow'),
+        schemaId: hex64('schemaId').optional().describe('Shared schema id, required whenever a contentRoot is supplied'),
+        compiledArtifactRef: z.string().optional().describe("Contract artifact ref, defaults to 'attestation-vault'"),
+        idempotencyKey: z.string().optional().describe('Dedupes retries'),
+        sponsorSessionId: z.string().uuid().optional().describe('Optional second session that pays the dust fee'),
+      },
+    },
+    run(async (args) =>
+      client.callAction('issueDocumentDiffAttestation', {
+        payloadHashA: args.payloadHashA,
+        payloadHashB: args.payloadHashB,
+        k: args.k,
+        schemaJson: JSON.stringify(args.schema),
+        openingAJson: JSON.stringify(args.openingA),
+        openingBJson: JSON.stringify(args.openingB),
+        contentRootA: args.contentRootA,
+        contentRootB: args.contentRootB,
+        schemaId: args.schemaId,
+        sessionId: args.sessionId,
+        contractAddress: args.contractAddress,
+        compiledArtifactRef: args.compiledArtifactRef,
+        idempotencyKey: args.idempotencyKey,
+        sponsorSessionId: args.sponsorSessionId,
+      })),
+  );
+
+  server.registerTool(
+    'prepare_anchor_commitment',
+    {
+      description:
+        'Phase 0 of guarded anchoring: compute the opaque commitment for commit_document_anchor ' +
+        'plus the nonce the later reveal needs. Compute-only and synchronous. STORE the nonce and ' +
+        'keep it SECRET until the reveal: it is exactly what a mempool front-runner cannot forge. ' +
+        'Pass the same metadata here and to anchor_document. Use this when the payload hash is ' +
+        'secret until anchoring; for publicly known identifiers, registrar pre-assignment is the ' +
+        'better protection.',
+      inputSchema: {
+        sha256: hex64('sha256').describe('sha256 of the document content (64 hex)'),
+        metadata: z.record(z.unknown()).optional()
+          .describe('Public metadata object; MUST equal the metadata passed to anchor_document later'),
+        nonce: hex64('nonce').optional().describe('Reuse a specific nonce; omit for a fresh random one'),
+      },
+    },
+    run(async (args) =>
+      client.callAction('prepareAnchorCommitment', {
+        sha256: args.sha256,
+        metadata: args.metadata === undefined ? undefined : JSON.stringify(args.metadata),
+        nonce: args.nonce,
+      })),
+  );
+
+  server.registerTool(
+    'commit_document_anchor',
+    {
+      description:
+        'Phase 1 of guarded anchoring: record the opaque commitment on-chain. Observers learn ' +
+        'nothing about the payload. Once this job finalizes, call anchor_document with the SAME ' +
+        'sha256 and metadata plus the nonce to reveal; a plain attest that front-ran the reveal is ' +
+        'taken over in-circuit, and everything the front-runner recorded meanwhile (content root, ' +
+        'disclosure grants, claims) stops counting. ' + POLL_HINT,
+      inputSchema: {
+        commitment: hex64('commitment').describe('The commitment from prepare_anchor_commitment (64 hex)'),
+        sessionId: z.string().uuid().describe('Wallet session id that signs and submits; the SAME session must reveal'),
+        contractAddress: z.string().min(1).describe('AttestationVault deployment'),
+        compiledArtifactRef: z.string().optional().describe("Contract artifact ref, defaults to 'attestation-vault'"),
+        idempotencyKey: z.string().optional().describe('Dedupes retries'),
+        sponsorSessionId: z.string().uuid().optional().describe('Optional second session that pays the dust fee'),
+      },
+    },
+    run(async (args) =>
+      client.callAction('commitDocumentAnchor', {
+        commitment: args.commitment,
+        sessionId: args.sessionId,
+        contractAddress: args.contractAddress,
+        compiledArtifactRef: args.compiledArtifactRef,
+        idempotencyKey: args.idempotencyKey,
+        sponsorSessionId: args.sponsorSessionId,
+      })),
   );
 
   server.registerTool(

@@ -25,6 +25,10 @@ const EXPECTED_TOOLS = [
   'prove_field_equality',
   'prove_field_membership',
   'prove_field_predicates_batch',
+  'prove_document_integrity',
+  'prove_document_diff',
+  'prepare_anchor_commitment',
+  'commit_document_anchor',
   'grant_disclosure',
   'revoke_disclosure',
   'get_job_status',
@@ -65,6 +69,7 @@ console.log('OK: invalid arguments are rejected before any HTTP call');
 const claim = {
   fieldKey: 'a'.repeat(64),
   value: '1',
+  salt: '9'.repeat(64),
   siblings: ['b'.repeat(64), 'c'.repeat(64), 'd'.repeat(64), 'e'.repeat(64)],
   dirs: [true, false, true, false],
   predicate: 'lessOrEqual',
@@ -89,7 +94,7 @@ const eqBothLanes = await client.callTool({
   arguments: {
     payloadHash: 'f'.repeat(64), fieldKey: 'a'.repeat(64),
     expectedValue: 'NMC811', expectedDigest: 'b'.repeat(64),
-    siblings: claim.siblings, dirs: claim.dirs,
+    fieldSalt: claim.salt, siblings: claim.siblings, dirs: claim.dirs,
     sessionId: '00000000-0000-0000-0000-000000000000', contractAddress: 'x',
   },
 }).catch((err) => ({ isError: true, content: [{ type: 'text', text: String(err) }] }));
@@ -135,6 +140,37 @@ if (process.env.NIGHTGATE_LIVE === '1') {
 } else {
   console.log('SKIP: live round-trip (set NIGHTGATE_LIVE=1 to enable)');
 }
+
+// Salted leaves: the slot salt is MANDATORY on every field proof from
+// NIGHTGATE 0.16.0 on, so the schema must reject a call without it. Omitting
+// it here is exactly what an older MCP would send, and the whole point of
+// the compatibility matrix in the README.
+const noSalt = await client.callTool({
+  name: 'prove_field_predicate',
+  arguments: {
+    payloadHash: 'f'.repeat(64), fieldKey: 'a'.repeat(64), value: '1',
+    siblings: claim.siblings, dirs: claim.dirs,
+    predicate: 'lessOrEqual', threshold: '10',
+    sessionId: '00000000-0000-0000-0000-000000000000', contractAddress: 'x',
+  },
+}).catch((err) => ({ isError: true, content: [{ type: 'text', text: String(err) }] }));
+if (!noSalt.isError) fail('prove_field_predicate accepted a call without fieldSalt (salted leaves are mandatory)');
+console.log('OK: field proofs require the slot salt');
+
+// Cross-root proofs need the shared 16-slot schema and BOTH full openings.
+const slots = Array.from({ length: 16 }, () => ({ present: false }));
+const opening = { saltSeed: '7'.repeat(64), slots };
+const schema = Array.from({ length: 16 }, () => ({ fieldKey: 'a'.repeat(64), kind: 2, scale: '0' }));
+const vacuous = await client.callTool({
+  name: 'prove_document_integrity',
+  arguments: {
+    payloadHashA: 'a'.repeat(64), payloadHashB: 'b'.repeat(64),
+    allowedMask: 0xffff, schema, openingA: opening, openingB: opening,
+    sessionId: '00000000-0000-0000-0000-000000000000', contractAddress: 'x',
+  },
+}).catch((err) => ({ isError: true, content: [{ type: 'text', text: String(err) }] }));
+if (!vacuous.isError) fail('prove_document_integrity accepted the vacuous all-ones mask');
+console.log('OK: vacuous integrity mask rejected client-side');
 
 await client.close();
 await server.close();
