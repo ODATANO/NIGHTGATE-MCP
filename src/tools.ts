@@ -1,6 +1,8 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { int64, NightgateApiError, NightgateClient } from './client.js';
+import type { NightgateMcpConfig } from './config.js';
+import { BUILDABLE_CALLS, buildSponsorable, attesterIdentity } from './builder.js';
 
 const HEX64 = /^[0-9a-fA-F]{64}$/;
 const hex64 = (what: string) =>
@@ -23,6 +25,8 @@ const setDirs = z.array(z.boolean()).length(6)
   .describe('Exactly 6 booleans; true means the current node is the LEFT child');
 
 const POLL_HINT = 'Async: returns { jobId, status } immediately; poll get_job_status until succeeded or failed.';
+/** NIGHTGATE's platform sponsor pool id (0.17.2+): the server picks a free pool sponsor. */
+const PLATFORM_POOL_SENTINEL = '00000000-0000-0000-0000-706f6f6c0000';
 
 /**
  * Per-slot salt of a proof field. Content-tree leaves are SALTED, so every
@@ -128,7 +132,7 @@ const documentDiffClaim = z.object({
  * curated write path (anchoring, field predicates, disclosure).
  * Wallet lifecycle actions are deliberately never exposed over MCP.
  */
-export function registerTools(server: McpServer, client: NightgateClient): void {
+export function registerTools(server: McpServer, client: NightgateClient, config?: NightgateMcpConfig): void {
   const run = wrapHandler(client);
 
   server.registerTool(
@@ -852,16 +856,162 @@ export function registerTools(server: McpServer, client: NightgateClient): void 
   );
 
   server.registerTool(
+    'build_sponsorable_transaction',
+    {
+      description:
+        'Build, prove and sign an AttestationVault call LOCALLY (caller half of cross-server fee ' +
+        'sponsoring, @odatano/nightgate-tx txbuilder): the seed comes from the MCP server ' +
+        'environment (NIGHTGATE_SEED_HEX), the attestation secret is derived from it, nothing ' +
+        'secret leaves this machine. Returns the fee-unpaid transaction as base64: UNBOUND by ' +
+        'default (hand it to sponsor_unbound_transaction, parallel channel) or bound with ' +
+        'bind:true (sponsor_finalized_transaction). The on-chain effect carries the attester id ' +
+        'of THIS builder (returned). Proving takes 20-60 s in-process (the first call also ' +
+        'fetches the prover keys from the NIGHTGATE /zk-config); NIGHTGATE_PROOF_SERVER_URL ' +
+        'switches to a proof server. Needs @odatano/nightgate-tx installed next to the MCP ' +
+        'server. params by call: attest {payloadHash, metadataHash}; anchorContentRoot ' +
+        '{payloadHash, contentRoot, schemaId}; grantDisclosure {payloadHash, grantee, level 0|1|2}; ' +
+        'revokeDisclosure {payloadHash, grantee}; registerPassport {passportId, ownerId}; ' +
+        'bindPassport {passportId, payloadHash}; attestCommit {commitment}; attestReveal ' +
+        '{payloadHash, metadataHash, nonce}; all hashes 64 hex. The built bytes are valid for ' +
+        'the transaction TTL (~30 min) and against the contract state at build time: if the ' +
+        'sponsor job ends CHAIN_EXECUTION_FAILED, build again.',
+      inputSchema: {
+        contractAddress: z.string().min(1).describe('AttestationVault contract address (64 hex)'),
+        call: z.enum(BUILDABLE_CALLS).describe('Which circuit to call'),
+        params: z.record(z.union([z.string(), z.number()]))
+          .describe('The call parameters (see the per-call list in the description)'),
+        bind: z.boolean().optional()
+          .describe('false (default): unbound for sponsor_unbound_transaction; true: finalized for sponsor_finalized_transaction'),
+      },
+    },
+    run(async (args) => {
+      if (!config) throw new Error('local building is not configured for this server instance');
+      return buildSponsorable(config, {
+        contractAddress: args.contractAddress, call: args.call, params: args.params, bind: args.bind === true,
+      });
+    }),
+  );
+
+  server.registerTool(
+    'get_attester_identity',
+    {
+      description:
+        'The attester id this MCP server builds under (derived from NIGHTGATE_SEED_HEX via the ' +
+        'txbuilder), plus the network. Use it to check verify_attestation results against the ' +
+        'identity that will appear on-chain; builds nothing and submits nothing.',
+      inputSchema: {},
+    },
+    run(async () => {
+      if (!config) throw new Error('local building is not configured for this server instance');
+      return attesterIdentity(config);
+    }),
+  );
+
+  server.registerTool(
+    'sponsor_finalized_transaction',
+    {
+      description:
+        'Cross-server fee sponsoring, phase 2 (NIGHTGATE 0.17.0): submit a FINALIZED, fee-unpaid ' +
+        'transaction that was built, proven and signed elsewhere (e.g. with the ' +
+        "@odatano/nightgate-tx txbuilder, so the caller's key never left its machine). The " +
+        "sponsor session pays the dust; the on-chain effect carries the BUILDER's identity, not " +
+        "the sponsor's. The server enforces its contract/circuit allow-list and rejects anything " +
+        'outside it. The transaction expires with its TTL (default 30 min), so hand it over ' +
+        'promptly. This is the SERIAL channel (one tx per sponsor wallet at a time); for ' +
+        'parallel submission build with bind:false and use sponsor_unbound_transaction. ' +
+        'Poll get_job_status with the sessionId RETURNED by this call (the sponsor the job ' +
+        'is keyed by; with the platform pool that is the pool id). ' + POLL_HINT,
+      inputSchema: {
+        finalizedTxB64: z.string().min(1)
+          .describe('Base64 of the caller-finalized, fee-unpaid transaction (~7000 chars for a vault call)'),
+        sponsorSessionId: z.string().uuid()
+          .describe('Wallet session that pays the dust and submits, or the platform sponsor POOL id ' +
+            `${PLATFORM_POOL_SENTINEL} (the server picks a free pool sponsor and fails over between them)`),
+        idempotencyKey: z.string().optional()
+          .describe('Dedupes retries; the request is also fingerprinted by the transaction bytes'),
+      },
+    },
+    run(async (args) =>
+      client.callAction('sponsorFinalizedTransaction', {
+        finalizedTxB64: args.finalizedTxB64,
+        sponsorSessionId: args.sponsorSessionId,
+        idempotencyKey: args.idempotencyKey,
+      })),
+  );
+
+  server.registerTool(
+    'sponsor_unbound_transaction',
+    {
+      description:
+        'Cross-server fee sponsoring, PARALLEL channel (NIGHTGATE 0.18.0): submit an UNBOUND ' +
+        '(pre-binding) proven+signed caller transaction, built with the @odatano/nightgate-tx ' +
+        "txbuilder's buildSponsorable({ bind: false }) (the caller's key never left its machine). " +
+        'The sponsor locks one free dust backing, merges its dust spend, binds and submits; only ' +
+        'the dust build takes the per-wallet lock, so ONE sponsor wallet sponsors N transactions ' +
+        'at once (N = its registered dust backings; live: several in the same block). Same ' +
+        'allow-list policy, pool and grant surface as sponsor_finalized_transaction; do not mix ' +
+        'both channels on one sponsor wallet. Contract state is account-style: two sponsored ' +
+        'calls against the SAME contract in one block conflict, the loser lands on-chain but its ' +
+        'call does not apply and the job ends failed with errorCode CHAIN_EXECUTION_FAILED (the ' +
+        'transaction hash is in the error); then REBUILD the transaction against the current ' +
+        'contract state and sponsor again (never resubmit the same bytes). Poll get_job_status ' +
+        'with the sessionId RETURNED by this call. ' + POLL_HINT,
+      inputSchema: {
+        unboundTxB64: z.string().min(1)
+          .describe('Base64 of the caller-built, proven and signed UNBOUND transaction (bind:false output)'),
+        sponsorSessionId: z.string().uuid()
+          .describe('Wallet session that pays the dust and submits, or the platform sponsor POOL id ' +
+            `${PLATFORM_POOL_SENTINEL}`),
+        idempotencyKey: z.string().optional()
+          .describe('Dedupes retries of the SAME bytes; a rebuilt transaction is a new key'),
+      },
+    },
+    run(async (args) =>
+      client.callAction('sponsorUnboundTransaction', {
+        unboundTxB64: args.unboundTxB64,
+        sponsorSessionId: args.sponsorSessionId,
+        idempotencyKey: args.idempotencyKey,
+      })),
+  );
+
+  server.registerTool(
+    'derive_token_type',
+    {
+      description:
+        'Derive the raw token type a minting contract produces (compute-only, no wallet, no ' +
+        'chain access). A custom token is addressed by rawTokenType(domainSeparator, ' +
+        'contractAddress); without it the minted balance cannot be transferred. domainSeparator ' +
+        'is the plain string the contract pads (Compact pad(32, "...")) or 64 hex for the padded ' +
+        "bytes; defaults to the bundled test token's. The result feeds sendNight(tokenTypeHex).",
+      inputSchema: {
+        contractAddress: z.string().min(1).describe('The minting contract address (64 hex)'),
+        domainSeparator: z.string().optional()
+          .describe("Separator string or 64 hex; defaults to 'nightgate:zswap-e2e' (the bundled test token)"),
+      },
+    },
+    run(async (args) =>
+      client.callFunction('deriveTokenType', {
+        contractAddress: args.contractAddress,
+        domainSeparator: args.domainSeparator,
+      })),
+  );
+
+  server.registerTool(
     'get_job_status',
     {
       description:
         'Poll the status of an async NIGHTGATE job (all submit actions return a jobId). ' +
         'status: pending | running | external_execution | submitted | reconciliation_required | ' +
         'succeeded | failed. Poll every few seconds until succeeded or failed; result carries ' +
-        'the job outcome JSON, chainStatus tracks on-chain finalization independently.',
+        'the job outcome JSON, chainStatus tracks on-chain finalization independently. ' +
+        'Sponsor jobs: failed + errorCode CHAIN_EXECUTION_FAILED = the transaction IS on-chain but ' +
+        'the contract call did not apply (same-contract conflict) -> rebuild and sponsor again; ' +
+        'reconciliation_required = broadcast outcome unknown to the server yet, the transaction ' +
+        'identifier is in the error message, the server keeps resolving it via the indexer.',
       inputSchema: {
         jobId: z.string().uuid().describe('Job id returned by a submit action'),
-        sessionId: z.string().uuid().describe('Wallet session id the job belongs to'),
+        sessionId: z.string().uuid()
+          .describe('Wallet session id the job belongs to; for sponsor jobs the sessionId RETURNED by the sponsor call'),
       },
     },
     run(async (args) =>

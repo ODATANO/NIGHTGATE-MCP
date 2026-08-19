@@ -31,6 +31,11 @@ const EXPECTED_TOOLS = [
   'commit_document_anchor',
   'grant_disclosure',
   'revoke_disclosure',
+  'build_sponsorable_transaction',
+  'get_attester_identity',
+  'sponsor_finalized_transaction',
+  'sponsor_unbound_transaction',
+  'derive_token_type',
   'get_job_status',
 ];
 
