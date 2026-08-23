@@ -25,8 +25,14 @@ import { closeBuilder } from '../dist/builder.js';
 
 const VAULT = process.env.NIGHTGATE_VAULT;
 const SPONSOR = process.env.NIGHTGATE_SPONSOR_SESSION_ID || '00000000-0000-0000-0000-706f6f6c0000';
-if (!process.env.NIGHTGATE_BASE_URL || !VAULT || !process.env.NIGHTGATE_TOKEN) {
-  console.error('need NIGHTGATE_BASE_URL, NIGHTGATE_TOKEN, NIGHTGATE_VAULT (+ NIGHTGATE_SEED_HEX, generated when absent)');
+// An agent grant token is the POINT of this lane, but a hosted server behind
+// basic auth has to be testable too, so either credential set is accepted and
+// the one in use is printed.
+const AUTH = process.env.NIGHTGATE_TOKEN ? 'agent-grant token'
+  : (process.env.NIGHTGATE_USERNAME && process.env.NIGHTGATE_PASSWORD) ? 'basic auth'
+    : null;
+if (!process.env.NIGHTGATE_BASE_URL || !VAULT || !AUTH) {
+  console.error('need NIGHTGATE_BASE_URL, NIGHTGATE_VAULT and either NIGHTGATE_TOKEN or NIGHTGATE_USERNAME + NIGHTGATE_PASSWORD (+ NIGHTGATE_SEED_HEX, generated when absent)');
   process.exit(1);
 }
 const env = { ...process.env, NIGHTGATE_TIMEOUT_MS: process.env.NIGHTGATE_TIMEOUT_MS || '120000' };
@@ -38,20 +44,26 @@ await server.connect(st);
 const client = new Client({ name: 'live-sponsor-unbound', version: '0' });
 await client.connect(ct);
 const text = (r) => r.content?.[0]?.text ?? '';
+// The MCP protocol has its own 60 s request timeout, well under what a first
+// build costs: a fresh vault lineage downloads its prover keys (~114 MB for
+// the 32-slot one) before it proves anything.
+const CALL_TIMEOUT_MS = Number(process.env.NIGHTGATE_MCP_CALL_TIMEOUT_MS || 900_000);
 const call = async (name, args) => {
-  const r = await client.callTool({ name, arguments: args });
+  const r = await client.callTool({ name, arguments: args }, undefined, { timeout: CALL_TIMEOUT_MS });
   if (r.isError) throw new Error(`${name} failed: ${text(r)}`);
   return JSON.parse(text(r));
 };
 
+const ARTIFACT = process.env.NIGHTGATE_VAULT_ARTIFACT || 'attestation-vault';
 const me = await call('get_attester_identity', {});
-console.log(`attester ${me.attesterId.slice(0, 16)}... on ${me.network}`);
+console.log(`attester ${me.attesterId.slice(0, 16)}... on ${me.network}, auth via ${AUTH}, vault lineage ${ARTIFACT}`);
 
 const payloadHash = randomBytes(32).toString('hex');
 const t0 = Date.now();
 const built = await call('build_sponsorable_transaction', {
   contractAddress: VAULT, call: 'attest',
   params: { payloadHash, metadataHash: randomBytes(32).toString('hex') },
+  compiledArtifactRef: ARTIFACT,
 });
 console.log(`built locally in ${((Date.now() - t0) / 1000).toFixed(1)}s (${built.provingMode}, ${built.serializedBytes} bytes, ${built.channel})`);
 
@@ -65,7 +77,7 @@ for (;;) {
 }
 console.log(`job ${job.status} after ${((Date.now() - t1) / 1000).toFixed(1)}s`, job.errorCode ? `(${job.errorCode})` : '', (job.result || '').slice(0, 160));
 
-const v = await call('verify_attestation', { contractAddress: VAULT, payloadHash });
+const v = await call('verify_attestation', { contractAddress: VAULT, payloadHash, compiledArtifactRef: ARTIFACT });
 console.log('verify_attestation:', JSON.stringify(v));
 await client.close();
 await closeBuilder();

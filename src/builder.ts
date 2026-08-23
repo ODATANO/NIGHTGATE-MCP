@@ -13,7 +13,17 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { NightgateMcpConfig } from './config.js';
 
-/** Call kinds this tool can prepare; one per attestation-vault helper. */
+/**
+ * Call kinds this tool can prepare; one per attestation-vault helper.
+ *
+ * The prove* entries are what lets a third party make a ZK claim with NO
+ * wallet on the server: the witness (the field value, its salt, the
+ * inclusion path) is consumed here in the caller's own process and only the
+ * finished transaction travels. The server-side `issueField*Attestation`
+ * actions do the same work with a SERVER wallet as the attester, which is
+ * the wrong shape for anyone but the operator: it would put someone else's
+ * key in our custody and stamp every claim with the same attester id.
+ */
 export const BUILDABLE_CALLS = [
   'attest',
   'anchorContentRoot',
@@ -23,14 +33,39 @@ export const BUILDABLE_CALLS = [
   'bindPassport',
   'attestCommit',
   'attestReveal',
+  'proveFieldPredicate',
+  'proveFieldEquality',
+  'proveFieldMembership',
+  'proveFieldsUnchangedExcept',
+  'proveFieldsDiffer',
 ] as const;
 export type BuildableCall = (typeof BUILDABLE_CALLS)[number];
+
+/**
+ * Vault lineages the local builder can load. Each needs its OWN compiled
+ * contract class and its own `/zk-config`, because the width is baked into
+ * the circuits. Picking the lineage also sets the slot width the prove*
+ * calls fold their inclusion paths over (16 or 32), so the address and the
+ * ref must belong together.
+ */
+export const BUILDABLE_ARTIFACTS = ['attestation-vault', 'attestation-vault-32'] as const;
+export type BuildableArtifact = (typeof BUILDABLE_ARTIFACTS)[number];
+export const DEFAULT_ARTIFACT: BuildableArtifact = 'attestation-vault';
 
 export interface BuildInput {
   contractAddress: string;
   call: BuildableCall;
   params: Record<string, string | number>;
   bind: boolean;
+  compiledArtifactRef?: BuildableArtifact;
+  /**
+   * WITNESS material for the prove* calls, exactly as prepare_document_proof
+   * returns it per field. Never persisted, never sent to the server: it is
+   * consumed by the local prover and only the proof leaves this process.
+   */
+  merkleProof?: Record<string, unknown>;
+  /** Cross-root witness bundle { schema, openingA, openingB } for the two comparison calls. */
+  docPair?: Record<string, unknown>;
 }
 
 export interface BuildOutput {
@@ -49,29 +84,33 @@ interface TxModules {
   Contract: unknown;
 }
 
-let modules: Promise<TxModules> | null = null;
-let builder: Promise<any> | null = null;
+const modules = new Map<BuildableArtifact, Promise<TxModules>>();
+const builders = new Map<BuildableArtifact, Promise<any>>();
 
-async function loadModules(): Promise<TxModules> {
-  if (!modules) {
-    modules = (async (): Promise<TxModules> => {
+async function loadModules(ref: BuildableArtifact = DEFAULT_ARTIFACT): Promise<TxModules> {
+  let entry = modules.get(ref);
+  if (!entry) {
+    entry = (async (): Promise<TxModules> => {
       try {
         const [tx, calls, vault] = await Promise.all([
           import('@odatano/nightgate-tx/txbuilder'),
           import('@odatano/nightgate-tx/calls'),
-          import('@odatano/nightgate-tx/attestation-vault'),
+          ref === 'attestation-vault-32'
+            ? import('@odatano/nightgate-tx/attestation-vault-32')
+            : import('@odatano/nightgate-tx/attestation-vault'),
         ]);
         return { createTxBuilder: tx.createTxBuilder as any, calls: calls as any, Contract: (vault as any).Contract };
       } catch (err) {
-        modules = null;
+        modules.delete(ref);
         throw new Error(
-          'local building needs @odatano/nightgate-tx >= 0.2.0 next to the MCP server ' +
+          `local building of '${ref}' needs @odatano/nightgate-tx >= 0.3.0 next to the MCP server ` +
           '(npm install @odatano/nightgate-tx): ' + (err instanceof Error ? err.message : String(err)),
         );
       }
     })();
+    modules.set(ref, entry);
   }
-  return modules as Promise<TxModules>;
+  return entry;
 }
 
 function defaults(network: string) {
@@ -82,25 +121,37 @@ function defaults(network: string) {
   };
 }
 
-/** One builder per process (the seed is fixed); created on first use. */
-async function getBuilder(config: NightgateMcpConfig): Promise<any> {
+/**
+ * One builder per VAULT LINEAGE (the seed is fixed, the circuits are not);
+ * created on first use. A 16-slot and a 32-slot vault need different
+ * contract classes, different prover keys and therefore separate cache
+ * directories, so they cannot share an instance.
+ */
+async function getBuilder(config: NightgateMcpConfig, ref: BuildableArtifact = DEFAULT_ARTIFACT): Promise<any> {
   if (!config.seedHex) {
     throw new Error('local building needs NIGHTGATE_SEED_HEX (64 or 128 hex) in the MCP server environment; it is never a tool argument');
   }
-  if (!builder) {
-    builder = (async () => {
-      const { createTxBuilder, Contract } = await loadModules();
+  let entry = builders.get(ref);
+  if (!entry) {
+    entry = (async () => {
+      const { createTxBuilder, Contract } = await loadModules(ref);
       const network = config.network;
       const d = defaults(network);
+      // An explicit zkConfigBaseUrl pins ONE lineage, so it only applies to
+      // the default ref; anything else derives its own from the server.
+      const zkBase = ref === DEFAULT_ARTIFACT && config.zkConfigBaseUrl
+        ? config.zkConfigBaseUrl
+        : `${config.baseUrl}/zk-config/${ref}`;
       const opts: Record<string, unknown> = {
         seedHex: config.seedHex,
         networkId: network,
         indexerHttpUrl: config.indexerHttpUrl ?? d.indexerHttpUrl,
         indexerWsUrl: config.indexerWsUrl ?? d.indexerWsUrl,
         nodeUrl: config.nodeUrl ?? d.nodeUrl,
-        zkConfigBaseUrl: config.zkConfigBaseUrl ?? `${config.baseUrl}/zk-config/attestation-vault`,
+        zkConfigBaseUrl: zkBase,
         contractClass: Contract,
-        cacheDir: config.zkCacheDir ?? join(tmpdir(), 'nightgate-mcp-zk'),
+        contractName: ref,
+        cacheDir: join(config.zkCacheDir ?? join(tmpdir(), 'nightgate-mcp-zk'), ref),
       };
       if (config.proofServerUrl) {
         opts.provingMode = 'server';
@@ -109,12 +160,13 @@ async function getBuilder(config: NightgateMcpConfig): Promise<any> {
       try {
         return await createTxBuilder(opts);
       } catch (err) {
-        builder = null;
+        builders.delete(ref);
         throw err;
       }
     })();
+    builders.set(ref, entry);
   }
-  return builder;
+  return entry;
 }
 
 function hexParam(params: Record<string, string | number>, key: string): string {
@@ -126,7 +178,47 @@ function hexParam(params: Record<string, string | number>, key: string): string 
 /** Map the tool's flat params onto the typed prepare* helper of the call kind. */
 function prepareCall(calls: TxModules['calls'], input: BuildInput, attestationSecret: Uint8Array): unknown {
   const p = input.params;
+  const slotWidth = input.compiledArtifactRef === 'attestation-vault-32' ? 32 : 16;
+  const witness = (what: string) => {
+    if (!input.merkleProof) throw new Error(`call '${input.call}' needs merkleProof (${what}); take it from prepare_document_proof`);
+    return input.merkleProof as any;
+  };
+  const pair = () => {
+    if (!input.docPair) throw new Error(`call '${input.call}' needs docPair { schema, openingA, openingB } from prepare_document_proof`);
+    return input.docPair as any;
+  };
   switch (input.call) {
+    case 'proveFieldPredicate': {
+      const op = Number(p.op);
+      if (![0, 1].includes(op)) throw new Error('params.op must be 0 (lessOrEqual) or 1 (greaterOrEqual)');
+      return calls.prepareProveFieldPredicate({
+        payloadHash: hexParam(p, 'payloadHash'), fieldKey: hexParam(p, 'fieldKey'),
+        threshold: BigInt(p.threshold as string | number), op: BigInt(op),
+        merkleProof: witness('fieldValue, fieldSalt, siblings, dirs'), attestationSecret, slotWidth,
+      } as any);
+    }
+    case 'proveFieldEquality':
+      return calls.prepareProveFieldEquality({
+        payloadHash: hexParam(p, 'payloadHash'), fieldKey: hexParam(p, 'fieldKey'),
+        expectedDigest: hexParam(p, 'expectedDigest'),
+        merkleProof: witness('fieldSalt, siblings, dirs'), attestationSecret, slotWidth,
+      } as any);
+    case 'proveFieldMembership':
+      return calls.prepareProveFieldMembership({
+        payloadHash: hexParam(p, 'payloadHash'), fieldKey: hexParam(p, 'fieldKey'),
+        setRoot: hexParam(p, 'setRoot'),
+        merkleProof: witness('fieldDigest, fieldSalt, siblings, dirs, setProof'), attestationSecret, slotWidth,
+      } as any);
+    case 'proveFieldsUnchangedExcept':
+      return calls.prepareProveFieldsUnchangedExcept({
+        payloadHashA: hexParam(p, 'payloadHashA'), payloadHashB: hexParam(p, 'payloadHashB'),
+        allowedMask: Number(p.allowedMask), docPair: pair(), attestationSecret, slotWidth,
+      } as any);
+    case 'proveFieldsDiffer':
+      return calls.prepareProveFieldsDiffer({
+        payloadHashA: hexParam(p, 'payloadHashA'), payloadHashB: hexParam(p, 'payloadHashB'),
+        k: Number(p.k), docPair: pair(), attestationSecret, slotWidth,
+      } as any);
     case 'attest':
       return calls.prepareAttest({ payloadHash: hexParam(p, 'payloadHash'), metadataHash: hexParam(p, 'metadataHash'), attestationSecret });
     case 'anchorContentRoot':
@@ -152,8 +244,9 @@ function prepareCall(calls: TxModules['calls'], input: BuildInput, attestationSe
 /** Build + prove + sign locally; unbound (parallel channel) by default. */
 export async function buildSponsorable(config: NightgateMcpConfig, input: BuildInput): Promise<BuildOutput> {
   const t0 = Date.now();
-  const b = await getBuilder(config);
-  const { calls } = await loadModules();
+  const ref = input.compiledArtifactRef ?? DEFAULT_ARTIFACT;
+  const b = await getBuilder(config, ref);
+  const { calls } = await loadModules(ref);
   const call = prepareCall(calls, input, b.attestationSecret);
   const built = await b.buildSponsorable({ contractAddress: input.contractAddress, call, bind: input.bind ? true : false });
   const out: BuildOutput = {
@@ -174,11 +267,11 @@ export async function attesterIdentity(config: NightgateMcpConfig): Promise<{ at
   return { attesterId: String(b.attesterId), network: config.network };
 }
 
-/** Test seam / shutdown: release the builder's connections. */
+/** Test seam / shutdown: release every lineage's builder connections. */
 export async function closeBuilder(): Promise<void> {
-  const b = builder;
-  builder = null;
-  if (b) {
+  const open = [...builders.values()];
+  builders.clear();
+  for (const b of open) {
     try { await (await b).close?.(); } catch { /* best effort */ }
   }
 }

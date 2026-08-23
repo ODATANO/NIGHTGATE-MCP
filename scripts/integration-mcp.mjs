@@ -162,20 +162,48 @@ const noSalt = await client.callTool({
 if (!noSalt.isError) fail('prove_field_predicate accepted a call without fieldSalt (salted leaves are mandatory)');
 console.log('OK: field proofs require the slot salt');
 
-// Cross-root proofs need the shared 16-slot schema and BOTH full openings.
-const slots = Array.from({ length: 16 }, () => ({ present: false }));
-const opening = { saltSeed: '7'.repeat(64), slots };
-const schema = Array.from({ length: 16 }, () => ({ fieldKey: 'a'.repeat(64), kind: 2, scale: '0' }));
-const vacuous = await client.callTool({
-  name: 'prove_document_integrity',
-  arguments: {
-    payloadHashA: 'a'.repeat(64), payloadHashB: 'b'.repeat(64),
-    allowedMask: 0xffff, schema, openingA: opening, openingB: opening,
-    sessionId: '00000000-0000-0000-0000-000000000000', contractAddress: 'x',
-  },
-}).catch((err) => ({ isError: true, content: [{ type: 'text', text: String(err) }] }));
-if (!vacuous.isError) fail('prove_document_integrity accepted the vacuous all-ones mask');
-console.log('OK: vacuous integrity mask rejected client-side');
+// Cross-root proofs need the shared schema and BOTH full openings, one
+// entry per slot of the vault width (16 by default, 32 on
+// attestation-vault-32). `real` slots carry a kind the mask can constrain;
+// kind 2 is padding and never counts.
+const widthFixture = (width, realSlots) => ({
+  opening: { saltSeed: '7'.repeat(64), slots: Array.from({ length: width }, () => ({ present: false })) },
+  schema: Array.from({ length: width }, (_, i) => ({
+    fieldKey: 'a'.repeat(64), kind: realSlots.includes(i) ? 0 : 2, scale: '0',
+  })),
+});
+const integrityCall = async (width, realSlots, allowedMask) => {
+  const { schema, opening } = widthFixture(width, realSlots);
+  return client.callTool({
+    name: 'prove_document_integrity',
+    arguments: {
+      payloadHashA: 'a'.repeat(64), payloadHashB: 'b'.repeat(64),
+      allowedMask, schema, openingA: opening, openingB: opening,
+      sessionId: '00000000-0000-0000-0000-000000000000',
+      contractAddress: 'c'.repeat(64),
+    },
+  }).catch((err) => ({ isError: true, content: [{ type: 'text', text: String(err) }] }));
+};
+const saysVacuous = (r) => r.isError && /vacuous/i.test(JSON.stringify(r.content ?? r));
+
+// A mask that frees every REAL slot proves nothing. Asserted on the MESSAGE:
+// with a valid contract address, the only thing left to reject is the mask.
+const vacuous16 = await integrityCall(16, [0, 1, 2, 3], 0b1111);
+if (!saysVacuous(vacuous16)) fail(`prove_document_integrity accepted a mask freeing every real slot: ${JSON.stringify(vacuous16).slice(0, 200)}`);
+console.log('OK: vacuous integrity mask rejected client-side, by schema not by a fixed constant');
+
+// The same rule at width 32, with the real slot at index 31: proves the
+// 32-entry schema/opening shape is accepted AND that bit 31 is read.
+const vacuous32 = await integrityCall(32, [0, 31], 0x80000001);
+if (!saysVacuous(vacuous32)) fail(`width-32 integrity call did not reach the mask check: ${JSON.stringify(vacuous32).slice(0, 200)}`);
+console.log('OK: width-32 schema/opening accepted, mask bit 31 evaluated');
+
+// Counter-test: the guard must not be a blanket reject. Freeing slot 31 but
+// leaving slot 0 constrained is a legitimate claim, so it has to get PAST
+// validation (and then fail on the HTTP call, since no server runs here).
+const legitimate32 = await integrityCall(32, [0, 31], 0x80000000);
+if (saysVacuous(legitimate32)) fail('a legitimate width-32 mask was rejected as vacuous');
+console.log('OK: a mask leaving one real slot constrained passes validation');
 
 await client.close();
 await server.close();

@@ -29,7 +29,8 @@ rejects the call with 400.
 
 | MCP | NIGHTGATE | Notes |
 |---|---|---|
-| **0.5.x** | **>= 0.18.0** | Current. Adds the parallel sponsoring channel (`sponsor_unbound_transaction`, platform pool id) and LOCAL transaction building (`build_sponsorable_transaction`, `get_attester_identity`) via the optional `@odatano/nightgate-tx` >= 0.2.0 txbuilder; `sponsor_unbound_transaction` 404s against older servers. |
+| **0.5.1** | **>= 0.19.0** for width 32 | Current. Accepts the 32-slot vault: schema and opening take 16 or 32 entries, `allowedMask` up to 32 bits, `k` up to 32, and the vacuity guard is checked against the SCHEMA instead of a fixed all-ones constant. Target it with `compiledArtifactRef: 'attestation-vault-32'`. Everything else is unchanged, so a 16-slot setup keeps working against any 0.18.x server. |
+| 0.5.x | >= 0.18.0 | Adds the parallel sponsoring channel (`sponsor_unbound_transaction`, platform pool id) and LOCAL transaction building (`build_sponsorable_transaction`, `get_attester_identity`) via the optional `@odatano/nightgate-tx` >= 0.2.0 txbuilder; `sponsor_unbound_transaction` 404s against older servers. |
 | 0.4.x | >= 0.17.0 | Cross-server fee sponsoring, serial channel only (`sponsor_finalized_transaction`), custom-token identity (`derive_token_type`). |
 | 0.3.x | >= 0.16.0 (0.16.2 recommended) | Cross-root proofs, guarded anchoring, schema ids, per-field salts. Does NOT work against 0.15.x and older, which know no salt parameters. |
 | 0.2.x | 0.15.x | Bytes equality and set membership on unsalted leaves. Against 0.16.0 and newer every field proof fails with "fieldSalt is required". |
@@ -168,7 +169,7 @@ Or in a project `.mcp.json`:
 | `prove_field_membership` | ZK proof that a hidden string field is one of a public allow-list, without revealing which (async job) |
 | `prove_field_predicates_batch` | Up to 8 claims on one document in ONE transaction, any mix of numeric / equality / membership / cross-root kinds (async job) |
 | `prove_document_integrity` | ZK proof that a second document differs from the anchored one ONLY in a public slot mask, values hidden (async job) |
-| `prove_document_diff` | ZK proof that two anchored documents differ at >= k of 16 slots, without revealing which (async job) |
+| `prove_document_diff` | ZK proof that two anchored documents differ at >= k of the vault's slots, without revealing which (async job) |
 | `prepare_anchor_commitment` | Compute the commitment + secret nonce for guarded anchoring (synchronous) |
 | `commit_document_anchor` | Record that commitment on-chain, so a mempool observer cannot front-run the later reveal (async job) |
 | `grant_disclosure` / `revoke_disclosure` | Attester-only on-chain disclosure ACL (async jobs) |

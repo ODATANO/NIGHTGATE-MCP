@@ -2,7 +2,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { int64, NightgateApiError, NightgateClient } from './client.js';
 import type { NightgateMcpConfig } from './config.js';
-import { BUILDABLE_CALLS, buildSponsorable, attesterIdentity } from './builder.js';
+import { BUILDABLE_CALLS, BUILDABLE_ARTIFACTS, buildSponsorable, attesterIdentity } from './builder.js';
 
 const HEX64 = /^[0-9a-fA-F]{64}$/;
 const hex64 = (what: string) =>
@@ -37,23 +37,49 @@ const fieldSalt = hex64('fieldSalt')
   .describe('Per-slot salt of this field, from prepare_document_proof (fields[].salt). Witness material, never publish');
 
 /** The shared 16-slot schema descriptor list from prepare_document_proof. */
+/**
+ * Content-tree slot widths NIGHTGATE ships: 16 (`attestation-vault`) and 32
+ * (`attestation-vault-32`). A document uses exactly one of them, picked by
+ * the `compiledArtifactRef` it is anchored under. These bounds only keep
+ * obvious nonsense out; the SERVER knows the registered width of the actual
+ * artifact and rejects a mismatch with a message naming it.
+ */
+const SLOT_WIDTHS = [16, 32];
+const MAX_SLOT_WIDTH = 32;
+const MAX_MASK = 0xffffffff;
+const slotCount = (what: string) => (list: unknown[]) => SLOT_WIDTHS.includes(list.length)
+  || `${what} must have ${SLOT_WIDTHS.join(' or ')} entries, one per slot of the vault width`;
+
+/**
+ * Mirrors the server's vacuity guard: a mask that frees every REAL
+ * (non-padding) slot of the schema proves nothing at all. Checking it
+ * against the SCHEMA rather than against a fixed all-ones constant is what
+ * makes it width-independent, and it also catches the case a constant never
+ * could, a mask that frees every real slot of a SHORT schema.
+ */
+function maskFreesEveryRealSlot(allowedMask: number, schema: Array<{ kind: number }>): boolean {
+  return schema.every((s, i) => s.kind === 2 || (allowedMask & (1 << i)) !== 0);
+}
+const VACUOUS_MASK_MESSAGE =
+  'allowedMask frees every real (non-padding) schema slot; the claim would be vacuous and the server rejects it';
+
 const schemaSlots = z.array(z.object({
   fieldKey: hex64('schema.fieldKey'),
   kind: z.union([z.literal(0), z.literal(1), z.literal(2)])
     .describe('0 = uint, 1 = bytes, 2 = padding'),
   scale: z.union([z.string(), z.number()]).describe("Off-chain scaling of uint slots, '0' otherwise"),
-})).length(16)
-  .describe('The 16-entry schema descriptor list returned by prepare_document_proof as `schema`. Both documents of a comparison MUST use the same one');
+})).refine((l) => slotCount('schema')(l) === true, { message: 'schema must have 16 or 32 entries, one per slot of the vault width' })
+  .describe('The schema descriptor list returned by prepare_document_proof as `schema`, one entry per slot (16 on the default vault, 32 on attestation-vault-32). Both documents of a comparison MUST use the same one');
 
-/** One document's full opening (salt seed + 16 slot values). */
+/** One document's full opening (salt seed + one value per slot). */
 const documentOpening = z.object({
   saltSeed: hex64('saltSeed'),
   slots: z.array(z.object({
     present: z.boolean(),
     value: z.string().optional().describe('uint slots: the scaled integer'),
     valueDigest: hex64('slot.valueDigest').optional().describe('bytes slots: the value digest'),
-  })).length(16),
-}).describe('A document\'s complete opening from prepare_document_proof (`opening`): salt seed plus all 16 slot values. WITNESS material for the whole document, never publish');
+  })).refine((l) => slotCount('slots')(l) === true, { message: 'slots must have 16 or 32 entries, one per slot of the vault width' }),
+}).describe('A document\'s complete opening from prepare_document_proof (`opening`): salt seed plus every slot value (16 or 32, matching the vault width). WITNESS material for the whole document, never publish');
 
 /** Batch claim shapes; claims may mix all kinds in one transaction. */
 const numericClaim = z.object({
@@ -112,16 +138,20 @@ const membershipClaim = z.object({
 const documentIntegrityClaim = z.object({
   predicate: z.literal('documentIntegrity'),
   payloadHashB: hex64('payloadHashB').describe('The second document (A is the batch payloadHash)'),
-  allowedMask: z.number().int().min(0).max(0xfffe)
-    .describe('Packed 16-bit mask, bit i = slot i MAY differ. Must leave at least one real schema slot constrained, otherwise the claim is vacuous and rejected'),
+  allowedMask: z.number().int().min(0).max(MAX_MASK - 1)
+    .describe('Packed slot mask, one bit per slot of the vault width (16 bits by default, 32 on attestation-vault-32), bit i = slot i MAY differ. Must leave at least one real schema slot constrained, otherwise the claim is vacuous and rejected'),
   schema: schemaSlots,
   openingA: documentOpening,
   openingB: documentOpening,
+}).superRefine((c, ctx) => {
+  if (maskFreesEveryRealSlot(c.allowedMask, c.schema)) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: VACUOUS_MASK_MESSAGE });
+  }
 });
 const documentDiffClaim = z.object({
   predicate: z.literal('documentDiff'),
   payloadHashB: hex64('payloadHashB').describe('The second document (A is the batch payloadHash)'),
-  k: z.number().int().min(1).max(16).describe('Minimum number of differing slots to prove'),
+  k: z.number().int().min(1).max(MAX_SLOT_WIDTH).describe('Minimum number of differing slots to prove, up to the vault width'),
   schema: schemaSlots,
   openingA: documentOpening,
   openingB: documentOpening,
@@ -189,9 +219,9 @@ export function registerTools(server: McpServer, client: NightgateClient, config
           .describe("setMembership only: the canonical allow-list set root"),
         payloadHashB: hex64('payloadHashB').optional()
           .describe('Cross-root kinds: the second document. (A, B) order is part of the claim, query it as proven'),
-        allowedMask: z.number().int().min(0).max(0xffff).optional()
-          .describe('documentIntegrity only: the packed 16-bit mask that was proven'),
-        k: z.number().int().min(1).max(16).optional()
+        allowedMask: z.number().int().min(0).max(MAX_MASK).optional()
+          .describe('documentIntegrity only: the packed slot mask that was proven (16 bits by default, 32 on attestation-vault-32)'),
+        k: z.number().int().min(1).max(MAX_SLOT_WIDTH).optional()
           .describe('documentDiff only: the k that was proven'),
         network: z.enum(['preview', 'preprod', 'mainnet']).optional()
           .describe('Read from another network public indexer instead of the configured one'),
@@ -300,7 +330,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
             .describe("Leaf kind: 'uint' (default, numeric scaled value) or 'bytes' (string value entered as digest of the exact string)"),
           scale: z.number().int().min(1).max(1_000_000_000).optional()
             .describe("Value scale (default 1000: milli-units); only valid for kind 'uint'"),
-        })).min(1).max(16).describe('ORDERED list of fields to make provable (leaf index = position)'),
+        })).min(1).max(MAX_SLOT_WIDTH).describe('ORDERED list of fields to make provable (leaf index = position). Up to 16 on the default vault, up to 32 with compiledArtifactRef attestation-vault-32'),
         saltSeed: hex64('saltSeed').optional()
           .describe('Reuse a stored salt seed to reproduce an already-anchored root; omit for a fresh document (random seed)'),
         compiledArtifactRef: z.string().optional().describe("Contract artifact ref, defaults to 'attestation-vault'"),
@@ -651,7 +681,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
     {
       description:
         'Prove that document B differs from anchored document A ONLY in the slots flagged by a ' +
-        'public 16-bit mask, values hidden: the version-integrity claim ("v2 changed nothing ' +
+        'public slot mask, values hidden: the version-integrity claim ("v2 changed nothing ' +
         'outside the allowed fields"). Both documents must be anchored, prepared with the SAME ' +
         'ordered field list (identical schemaId) and you need BOTH full openings, which is why ' +
         'this only works for a party that holds both documents. A mask that frees every real slot ' +
@@ -660,8 +690,8 @@ export function registerTools(server: McpServer, client: NightgateClient, config
       inputSchema: {
         payloadHashA: hex64('payloadHashA').describe('Anchored document A (64 hex)'),
         payloadHashB: hex64('payloadHashB').describe('Anchored document B; must differ from A'),
-        allowedMask: z.number().int().min(0).max(0xfffe)
-          .describe('Packed 16-bit mask, bit i = slot i MAY differ. At least one real schema slot must stay constrained'),
+        allowedMask: z.number().int().min(0).max(MAX_MASK - 1)
+          .describe('Packed slot mask, one bit per slot of the vault width (16 bits by default, 32 on attestation-vault-32), bit i = slot i MAY differ. At least one real schema slot must stay constrained'),
         schema: schemaSlots,
         openingA: documentOpening,
         openingB: documentOpening,
@@ -675,8 +705,9 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         sponsorSessionId: z.string().uuid().optional().describe('Optional second session that pays the dust fee'),
       },
     },
-    run(async (args) =>
-      client.callAction('issueDocumentIntegrityAttestation', {
+    run(async (args) => {
+      if (maskFreesEveryRealSlot(args.allowedMask, args.schema)) throw new Error(VACUOUS_MASK_MESSAGE);
+      return client.callAction('issueDocumentIntegrityAttestation', {
         payloadHashA: args.payloadHashA,
         payloadHashB: args.payloadHashB,
         allowedMask: args.allowedMask,
@@ -691,14 +722,16 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         compiledArtifactRef: args.compiledArtifactRef,
         idempotencyKey: args.idempotencyKey,
         sponsorSessionId: args.sponsorSessionId,
-      })),
+      });
+    }),
   );
 
   server.registerTool(
     'prove_document_diff',
     {
       description:
-        'Prove that at least k of the 16 aligned slots differ between two anchored documents, ' +
+        'Prove that at least k of the aligned slots differ between two anchored documents ' +
+        '(16 slots on the default vault, 32 on attestation-vault-32), ' +
         'without revealing which slots or what values: the distinctness claim (k=1 is "provably ' +
         'not the same document"). Same requirements as prove_document_integrity: identical field ' +
         'list, both openings in hand. A difference is a value change or a field that appeared or ' +
@@ -707,7 +740,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
       inputSchema: {
         payloadHashA: hex64('payloadHashA').describe('Anchored document A (64 hex)'),
         payloadHashB: hex64('payloadHashB').describe('Anchored document B; must differ from A'),
-        k: z.number().int().min(1).max(16).describe('Minimum number of differing slots to prove'),
+        k: z.number().int().min(1).max(MAX_SLOT_WIDTH).describe('Minimum number of differing slots to prove, up to the vault width'),
         schema: schemaSlots,
         openingA: documentOpening,
         openingB: documentOpening,
@@ -872,7 +905,16 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         '{payloadHash, contentRoot, schemaId}; grantDisclosure {payloadHash, grantee, level 0|1|2}; ' +
         'revokeDisclosure {payloadHash, grantee}; registerPassport {passportId, ownerId}; ' +
         'bindPassport {passportId, payloadHash}; attestCommit {commitment}; attestReveal ' +
-        '{payloadHash, metadataHash, nonce}; all hashes 64 hex. The built bytes are valid for ' +
+        '{payloadHash, metadataHash, nonce}. ZK CLAIMS, proven here with no wallet on the ' +
+        'server and no witness ever sent to it: proveFieldPredicate {payloadHash, fieldKey, ' +
+        'threshold, op 0=lessOrEqual|1=greaterOrEqual} plus merkleProof {fieldValue, fieldSalt, ' +
+        'siblings, dirs}; proveFieldEquality {payloadHash, fieldKey, expectedDigest} plus ' +
+        'merkleProof {fieldSalt, siblings, dirs}; proveFieldMembership {payloadHash, fieldKey, ' +
+        'setRoot} plus merkleProof {fieldDigest, fieldSalt, siblings, dirs, setProof}; ' +
+        'proveFieldsUnchangedExcept {payloadHashA, payloadHashB, allowedMask} and ' +
+        'proveFieldsDiffer {payloadHashA, payloadHashB, k}, both plus docPair {schema, ' +
+        'openingA, openingB}. Every witness field comes straight out of ' +
+        'prepare_document_proof. All hashes 64 hex. The built bytes are valid for ' +
         'the transaction TTL (~30 min) and against the contract state at build time: if the ' +
         'sponsor job ends CHAIN_EXECUTION_FAILED, build again.',
       inputSchema: {
@@ -880,14 +922,22 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         call: z.enum(BUILDABLE_CALLS).describe('Which circuit to call'),
         params: z.record(z.union([z.string(), z.number()]))
           .describe('The call parameters (see the per-call list in the description)'),
+        merkleProof: z.record(z.any()).optional()
+          .describe('WITNESS material for the proveField* calls, as prepare_document_proof returns it for that field (fieldValue/fieldDigest, fieldSalt, siblings, dirs, setProof). It is consumed by the local prover and never sent to NIGHTGATE'),
+        docPair: z.record(z.any()).optional()
+          .describe('WITNESS bundle { schema, openingA, openingB } for proveFieldsUnchangedExcept / proveFieldsDiffer; both documents must be prepared with the same ordered field list'),
         bind: z.boolean().optional()
           .describe('false (default): unbound for sponsor_unbound_transaction; true: finalized for sponsor_finalized_transaction'),
+        compiledArtifactRef: z.enum(BUILDABLE_ARTIFACTS).optional()
+          .describe("Vault lineage to build against, defaults to 'attestation-vault'. Use 'attestation-vault-32' for a 32-slot vault: it has its own circuits, so the builder loads that contract class and fetches ITS prover keys from the server's /zk-config. The address must belong to the lineage named here"),
       },
     },
     run(async (args) => {
       if (!config) throw new Error('local building is not configured for this server instance');
       return buildSponsorable(config, {
         contractAddress: args.contractAddress, call: args.call, params: args.params, bind: args.bind === true,
+        compiledArtifactRef: args.compiledArtifactRef,
+        merkleProof: args.merkleProof, docPair: args.docPair,
       });
     }),
   );
