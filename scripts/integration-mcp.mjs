@@ -4,8 +4,9 @@
  * lists the tools and asserts the phase-A tool set is present with schemas.
  *
  * Live mode (optional): set NIGHTGATE_LIVE=1 plus NIGHTGATE_BASE_URL and
- * credentials, and provide NIGHTGATE_TEST_CONTRACT + NIGHTGATE_TEST_PAYLOAD_HASH
- * to round-trip verify_attestation against a running NIGHTGATE server.
+ * credentials, and provide NIGHTGATE_TEST_CONTRACT + NIGHTGATE_TEST_ATTESTER_ID +
+ * NIGHTGATE_TEST_PAYLOAD_HASH to round-trip verify_attestation against a
+ * running NIGHTGATE server.
  */
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
@@ -27,8 +28,6 @@ const EXPECTED_TOOLS = [
   'prove_field_predicates_batch',
   'prove_document_integrity',
   'prove_document_diff',
-  'prepare_anchor_commitment',
-  'commit_document_anchor',
   'grant_disclosure',
   'revoke_disclosure',
   'build_sponsorable_transaction',
@@ -65,10 +64,20 @@ console.log(`OK: ${names.length} tools registered: ${names.join(', ')}`);
 // not forwarded to NIGHTGATE.
 const bad = await client.callTool({
   name: 'verify_attestation',
-  arguments: { contractAddress: 'x', payloadHash: 'not-hex' },
+  arguments: { contractAddress: 'x', attesterId: 'a'.repeat(64), payloadHash: 'not-hex' },
 }).catch((err) => ({ isError: true, content: [{ type: 'text', text: String(err) }] }));
 if (!bad.isError) fail('verify_attestation accepted an invalid payloadHash');
 console.log('OK: invalid arguments are rejected before any HTTP call');
+
+// A record is named by attester + payload, or by a bound document id.
+const unnamed = await client.callTool({
+  name: 'verify_attestation',
+  arguments: { contractAddress: 'x', payloadHash: 'f'.repeat(64) },
+}).catch((err) => ({ isError: true, content: [{ type: 'text', text: String(err) }] }));
+if (!unnamed.isError || !/attesterId \+ payloadHash, or documentId/.test(JSON.stringify(unnamed.content))) {
+  fail('verify_attestation accepted a payloadHash without its attester');
+}
+console.log('OK: verify_attestation needs attesterId + payloadHash or a documentId');
 
 // Write-tool client-side rule: contentRoot occupies a batch slot, so 8 claims + root must fail.
 const claim = {
@@ -120,7 +129,7 @@ console.log('OK: membership allowedValues/setRoot lane rule enforced client-side
 const badVerifyKind = await client.callTool({
   name: 'verify_predicate',
   arguments: {
-    contractAddress: 'x', payloadHash: 'f'.repeat(64),
+    contractAddress: 'x', attesterId: 'a'.repeat(64), payloadHash: 'f'.repeat(64),
     predicate: 'setMembership', fieldKey: 'a'.repeat(64),
   },
 }).catch((err) => ({ isError: true, content: [{ type: 'text', text: String(err) }] }));
@@ -129,13 +138,14 @@ console.log('OK: verify_predicate per-kind coordinate rules enforced client-side
 
 if (process.env.NIGHTGATE_LIVE === '1') {
   const contractAddress = process.env.NIGHTGATE_TEST_CONTRACT;
+  const attesterId = process.env.NIGHTGATE_TEST_ATTESTER_ID;
   const payloadHash = process.env.NIGHTGATE_TEST_PAYLOAD_HASH;
-  if (!contractAddress || !payloadHash) {
-    fail('live mode needs NIGHTGATE_TEST_CONTRACT and NIGHTGATE_TEST_PAYLOAD_HASH');
+  if (!contractAddress || !attesterId || !payloadHash) {
+    fail('live mode needs NIGHTGATE_TEST_CONTRACT, NIGHTGATE_TEST_ATTESTER_ID and NIGHTGATE_TEST_PAYLOAD_HASH');
   }
   const result = await client.callTool({
     name: 'verify_attestation',
-    arguments: { contractAddress, payloadHash },
+    arguments: { contractAddress, attesterId, payloadHash },
   });
   const text = result.content?.[0]?.text ?? '';
   if (result.isError) fail(`live verify_attestation errored: ${text}`);

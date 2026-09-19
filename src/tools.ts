@@ -138,6 +138,7 @@ const membershipClaim = z.object({
 const documentIntegrityClaim = z.object({
   predicate: z.literal('documentIntegrity'),
   payloadHashB: hex64('payloadHashB').describe('The second document (A is the batch payloadHash)'),
+  attesterIdB: hex64('attesterIdB').optional().describe('Document B\'s attester; default the batch attester'),
   allowedMask: z.number().int().min(0).max(MAX_MASK - 1)
     .describe('Packed slot mask, one bit per slot of the vault width (16 bits by default, 32 on attestation-vault-32), bit i = slot i MAY differ. Must leave at least one real schema slot constrained, otherwise the claim is vacuous and rejected'),
   schema: schemaSlots,
@@ -151,6 +152,7 @@ const documentIntegrityClaim = z.object({
 const documentDiffClaim = z.object({
   predicate: z.literal('documentDiff'),
   payloadHashB: hex64('payloadHashB').describe('The second document (A is the batch payloadHash)'),
+  attesterIdB: hex64('attesterIdB').optional().describe('Document B\'s attester; default the batch attester'),
   k: z.number().int().min(1).max(MAX_SLOT_WIDTH).describe('Minimum number of differing slots to prove, up to the vault width'),
   schema: schemaSlots,
   openingA: documentOpening,
@@ -169,12 +171,21 @@ export function registerTools(server: McpServer, client: NightgateClient, config
     'verify_attestation',
     {
       description:
-        'Verify against LIVE Midnight contract state that a payload hash is attested in an ' +
-        'AttestationVault (crawler-free, no txHash needed). Optionally also checks that the ' +
-        'anchored content root matches. Returns verified:false (not an error) when absent.',
+        'Verify against LIVE Midnight contract state that an attester\'s record of a payload ' +
+        'hash stands in an AttestationVault (crawler-free, no txHash needed). A record is ONE ' +
+        'attester\'s attestation of ONE payload (ledger key recordKey(attesterId, payloadHash)): ' +
+        'name it by attesterId + payloadHash, or by a bound documentId, which resolves to exactly ' +
+        'one record and reveals its attester. Optionally also checks that the anchored content ' +
+        'root / schema id match. Returns verified:false (not an error) when absent; the result ' +
+        'carries attesterId, payloadHash, recordKey and documentId.',
       inputSchema: {
         contractAddress: z.string().min(1).describe('AttestationVault contract address'),
-        payloadHash: hex64('payloadHash').describe('The attested payload hash (sha256, 64 hex)'),
+        attesterId: hex64('attesterId').optional()
+          .describe('The attester whose record to check (64 hex; get_attester_identity for this server\'s own). Required unless documentId is given'),
+        payloadHash: hex64('payloadHash').optional()
+          .describe('The attested payload hash (sha256, 64 hex). Required with attesterId; next to documentId it must match the bound record'),
+        documentId: hex64('documentId').optional()
+          .describe('A bound document id (64 hex): resolves the record through the vault\'s document bindings'),
         contentRoot: hex64('contentRoot').optional().describe('Optional anchored content root to check (64 hex)'),
         schemaId: hex64('schemaId').optional()
           .describe('Optional anchored schema id to check; the result reports schemaOk, so an examiner can pin the canonical field list'),
@@ -183,15 +194,21 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         compiledArtifactRef: z.string().optional().describe("Contract artifact ref, defaults to 'attestation-vault'"),
       },
     },
-    run(async (args) =>
-      client.callFunction('verifyAttestationState', {
+    run(async (args) => {
+      if (!args.documentId && !(args.attesterId && args.payloadHash)) {
+        throw new Error('name the record: attesterId + payloadHash, or documentId');
+      }
+      return client.callFunction('verifyAttestationState', {
         contractAddress: args.contractAddress,
+        attesterId: args.attesterId,
         payloadHash: args.payloadHash,
+        documentId: args.documentId,
         contentRoot: args.contentRoot,
         schemaId: args.schemaId,
         compiledArtifactRef: args.compiledArtifactRef,
         network: args.network,
-      })),
+      });
+    }),
   );
 
   server.registerTool(
@@ -203,9 +220,11 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         'greaterOrEqual) need threshold (the SAME scaled integer the circuit hashed; a scaling ' +
         'mismatch yields verified:false) and optionally fieldKey for field-bound proofs. ' +
         'bytesEquality needs fieldKey + expectedDigest; setMembership needs fieldKey + setRoot ' +
-        '(recompute it from the published list via prepare_membership_set).',
+        '(recompute it from the published list via prepare_membership_set). Every claim is bound ' +
+        'to ONE attester\'s record of the document, so attesterId is part of the coordinates.',
       inputSchema: {
         contractAddress: z.string().min(1).describe('AttestationVault contract address'),
+        attesterId: hex64('attesterId').describe('The attester whose record of payloadHash carries the claim (64 hex)'),
         payloadHash: hex64('payloadHash').describe('The attestation payload hash (64 hex)'),
         predicate: z.enum(['lessOrEqual', 'greaterOrEqual', 'bytesEquality', 'setMembership',
           'documentIntegrity', 'documentDiff']).describe('Claim kind'),
@@ -219,6 +238,8 @@ export function registerTools(server: McpServer, client: NightgateClient, config
           .describe("setMembership only: the canonical allow-list set root"),
         payloadHashB: hex64('payloadHashB').optional()
           .describe('Cross-root kinds: the second document. (A, B) order is part of the claim, query it as proven'),
+        attesterIdB: hex64('attesterIdB').optional()
+          .describe('Cross-root kinds: document B\'s attester; defaults to attesterId'),
         allowedMask: z.number().int().min(0).max(MAX_MASK).optional()
           .describe('documentIntegrity only: the packed slot mask that was proven (16 bits by default, 32 on attestation-vault-32)'),
         k: z.number().int().min(1).max(MAX_SLOT_WIDTH).optional()
@@ -246,7 +267,9 @@ export function registerTools(server: McpServer, client: NightgateClient, config
       }
       return client.callFunction('verifyPredicateState', {
         contractAddress: args.contractAddress,
+        attesterId: args.attesterId,
         payloadHash: args.payloadHash,
+        attesterIdB: args.attesterIdB,
         fieldKey: args.fieldKey,
         predicate: args.predicate,
         threshold: args.threshold === undefined ? undefined : int64(args.threshold),
@@ -390,12 +413,11 @@ export function registerTools(server: McpServer, client: NightgateClient, config
     {
       description:
         'Anchor a document content hash on the Midnight chain via the AttestationVault attest ' +
-        'circuit. Commits only the sha256 + public metadata; you are responsible for storing the ' +
-        'actual bytes at storageRef. Plain attestation is first-come-first-served per hash, so a ' +
-        'mempool observer can front-run a visible hash: for a hash that is secret until anchoring, ' +
-        'use prepare_anchor_commitment + commit_document_anchor first and pass the nonce here, ' +
-        'which turns this call into the guarded REVEAL and reclaims a front-run hash. ' + POLL_HINT +
-        ' Also returns documentId for verify_document.',
+        'circuit (one transaction). Commits only the sha256 + public metadata; you are responsible ' +
+        'for storing the actual bytes at storageRef. The on-chain record is keyed by the session\'s ' +
+        'attester id AND the hash, so nobody can pre-empt or take over it; the same hash anchored ' +
+        'by another identity is a separate record. ' + POLL_HINT +
+        ' Also returns documentId for verify_document and attesterId, which verifiers need next to the hash.',
       inputSchema: {
         sha256: hex64('sha256').describe('sha256 of the document content (64 hex), becomes the on-chain payload hash'),
         storageRef: z.string().min(1).describe('Where the bytes live, e.g. file://, s3://, ipfs://'),
@@ -404,8 +426,6 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         contentType: z.string().optional().describe('MIME type, informational'),
         size: z.number().int().nonnegative().optional().describe('Content size in bytes, informational'),
         metadata: z.record(z.unknown()).optional().describe('Public metadata object; its hash is anchored alongside'),
-        nonce: hex64('nonce').optional()
-          .describe('Guarded REVEAL: the secret nonce from prepare_anchor_commitment, after commit_document_anchor finalized. Same sha256 and metadata as the commitment'),
         compiledArtifactRef: z.string().optional().describe("Contract artifact ref, defaults to 'attestation-vault'"),
         idempotencyKey: z.string().optional().describe('Dedupes retries of the same anchor request'),
         sponsorSessionId: z.string().uuid().optional().describe('Optional second session that pays the dust fee'),
@@ -418,7 +438,6 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         size: args.size,
         storageRef: args.storageRef,
         metadata: args.metadata === undefined ? undefined : JSON.stringify(args.metadata),
-        nonce: args.nonce,
         sessionId: args.sessionId,
         contractAddress: args.contractAddress,
         compiledArtifactRef: args.compiledArtifactRef,
@@ -439,6 +458,8 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         'at local proving time, nothing is submitted. ' + POLL_HINT,
       inputSchema: {
         payloadHash: hex64('payloadHash').describe('Attestation payload hash (64 hex)'),
+        attesterId: hex64('attesterId').optional()
+          .describe('The attester whose record of payloadHash the claim is bound to (64 hex); default the session\'s own. A contentRoot can only be anchored under the session\'s own record'),
         fieldKey: hex64('fieldKey').describe('Canonical field id (64 hex, public)'),
         value: z.string().regex(/^\d+$/, 'value must be a non-negative integer (decimal string)')
           .describe('Scaled integer field value (witness only, never persisted)'),
@@ -460,6 +481,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
     run(async (args) =>
       client.callAction('issueFieldPredicateAttestation', {
         payloadHash: args.payloadHash,
+        attesterId: args.attesterId,
         fieldKey: args.fieldKey,
         value: args.value,
         fieldSalt: args.fieldSalt,
@@ -523,6 +545,8 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         'supplied it is anchored first. ' + POLL_HINT,
       inputSchema: {
         payloadHash: hex64('payloadHash').describe('Attestation payload hash (64 hex)'),
+        attesterId: hex64('attesterId').optional()
+          .describe('The attester whose record of payloadHash the claim is bound to (64 hex); default the session\'s own. A contentRoot can only be anchored under the session\'s own record'),
         fieldKey: hex64('fieldKey').describe('Canonical field id (64 hex, public)'),
         expectedValue: z.string().min(1).optional()
           .describe('Raw expected string (the server digests the EXACT string; pass this OR expectedDigest)'),
@@ -546,6 +570,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
       }
       return client.callAction('issueFieldEqualityAttestation', {
         payloadHash: args.payloadHash,
+        attesterId: args.attesterId,
         fieldKey: args.fieldKey,
         expectedValue: args.expectedValue,
         expectedDigest: args.expectedDigest,
@@ -576,6 +601,8 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         'contentRoot is supplied it is anchored first. ' + POLL_HINT,
       inputSchema: {
         payloadHash: hex64('payloadHash').describe('Attestation payload hash (64 hex)'),
+        attesterId: hex64('attesterId').optional()
+          .describe('The attester whose record of payloadHash the claim is bound to (64 hex); default the session\'s own. A contentRoot can only be anchored under the session\'s own record'),
         fieldKey: hex64('fieldKey').describe('Canonical field id (64 hex, public)'),
         value: z.string().min(1).optional()
           .describe('Raw member string (witness only; pass this OR valueDigest)'),
@@ -610,6 +637,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
       }
       return client.callAction('issueFieldMembershipAttestation', {
         payloadHash: args.payloadHash,
+        attesterId: args.attesterId,
         fieldKey: args.fieldKey,
         value: args.value,
         valueDigest: args.valueDigest,
@@ -645,6 +673,9 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         'assuming all-or-nothing. ' + POLL_HINT,
       inputSchema: {
         payloadHash: hex64('payloadHash').describe('Shared attestation payload hash; also document A of any cross-root claim (64 hex)'),
+        attesterId: hex64('attesterId').optional()
+          .describe('The attester whose record of payloadHash the claim is bound to (64 hex); default the session\'s own. A contentRoot can only be anchored under the session\'s own record'),
+
         claims: z.array(z.union([numericClaim, equalityClaim, membershipClaim, documentIntegrityClaim, documentDiffClaim]))
           .min(1).max(8)
           .describe('1-8 claims on the same payload hash; any mix of numeric, bytesEquality, setMembership, documentIntegrity and documentDiff'),
@@ -663,6 +694,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
       }
       return client.callAction('issueFieldPredicateAttestationBatch', {
         payloadHash: args.payloadHash,
+        attesterId: args.attesterId,
         contentRoot: args.contentRoot,
         schemaId: args.schemaId,
         claimsJson: JSON.stringify(args.claims.map((c) =>
@@ -690,6 +722,11 @@ export function registerTools(server: McpServer, client: NightgateClient, config
       inputSchema: {
         payloadHashA: hex64('payloadHashA').describe('Anchored document A (64 hex)'),
         payloadHashB: hex64('payloadHashB').describe('Anchored document B; must differ from A'),
+        attesterIdA: hex64('attesterIdA').optional()
+          .describe('Document A\'s attester (64 hex); default the session\'s own'),
+        attesterIdB: hex64('attesterIdB').optional()
+          .describe('Document B\'s attester (64 hex); default attesterIdA'),
+
         allowedMask: z.number().int().min(0).max(MAX_MASK - 1)
           .describe('Packed slot mask, one bit per slot of the vault width (16 bits by default, 32 on attestation-vault-32), bit i = slot i MAY differ. At least one real schema slot must stay constrained'),
         schema: schemaSlots,
@@ -710,6 +747,8 @@ export function registerTools(server: McpServer, client: NightgateClient, config
       return client.callAction('issueDocumentIntegrityAttestation', {
         payloadHashA: args.payloadHashA,
         payloadHashB: args.payloadHashB,
+        attesterIdA: args.attesterIdA,
+        attesterIdB: args.attesterIdB,
         allowedMask: args.allowedMask,
         schemaJson: JSON.stringify(args.schema),
         openingAJson: JSON.stringify(args.openingA),
@@ -740,6 +779,11 @@ export function registerTools(server: McpServer, client: NightgateClient, config
       inputSchema: {
         payloadHashA: hex64('payloadHashA').describe('Anchored document A (64 hex)'),
         payloadHashB: hex64('payloadHashB').describe('Anchored document B; must differ from A'),
+        attesterIdA: hex64('attesterIdA').optional()
+          .describe('Document A\'s attester (64 hex); default the session\'s own'),
+        attesterIdB: hex64('attesterIdB').optional()
+          .describe('Document B\'s attester (64 hex); default attesterIdA'),
+
         k: z.number().int().min(1).max(MAX_SLOT_WIDTH).describe('Minimum number of differing slots to prove, up to the vault width'),
         schema: schemaSlots,
         openingA: documentOpening,
@@ -758,6 +802,8 @@ export function registerTools(server: McpServer, client: NightgateClient, config
       client.callAction('issueDocumentDiffAttestation', {
         payloadHashA: args.payloadHashA,
         payloadHashB: args.payloadHashB,
+        attesterIdA: args.attesterIdA,
+        attesterIdB: args.attesterIdB,
         k: args.k,
         schemaJson: JSON.stringify(args.schema),
         openingAJson: JSON.stringify(args.openingA),
@@ -765,60 +811,6 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         contentRootA: args.contentRootA,
         contentRootB: args.contentRootB,
         schemaId: args.schemaId,
-        sessionId: args.sessionId,
-        contractAddress: args.contractAddress,
-        compiledArtifactRef: args.compiledArtifactRef,
-        idempotencyKey: args.idempotencyKey,
-        sponsorSessionId: args.sponsorSessionId,
-      })),
-  );
-
-  server.registerTool(
-    'prepare_anchor_commitment',
-    {
-      description:
-        'Phase 0 of guarded anchoring: compute the opaque commitment for commit_document_anchor ' +
-        'plus the nonce the later reveal needs. Compute-only and synchronous. STORE the nonce and ' +
-        'keep it SECRET until the reveal: it is exactly what a mempool front-runner cannot forge. ' +
-        'Pass the same metadata here and to anchor_document. Use this when the payload hash is ' +
-        'secret until anchoring; for publicly known identifiers, registrar pre-assignment is the ' +
-        'better protection.',
-      inputSchema: {
-        sha256: hex64('sha256').describe('sha256 of the document content (64 hex)'),
-        metadata: z.record(z.unknown()).optional()
-          .describe('Public metadata object; MUST equal the metadata passed to anchor_document later'),
-        nonce: hex64('nonce').optional().describe('Reuse a specific nonce; omit for a fresh random one'),
-      },
-    },
-    run(async (args) =>
-      client.callAction('prepareAnchorCommitment', {
-        sha256: args.sha256,
-        metadata: args.metadata === undefined ? undefined : JSON.stringify(args.metadata),
-        nonce: args.nonce,
-      })),
-  );
-
-  server.registerTool(
-    'commit_document_anchor',
-    {
-      description:
-        'Phase 1 of guarded anchoring: record the opaque commitment on-chain. Observers learn ' +
-        'nothing about the payload. Once this job finalizes, call anchor_document with the SAME ' +
-        'sha256 and metadata plus the nonce to reveal; a plain attest that front-ran the reveal is ' +
-        'taken over in-circuit, and everything the front-runner recorded meanwhile (content root, ' +
-        'disclosure grants, claims) stops counting. ' + POLL_HINT,
-      inputSchema: {
-        commitment: hex64('commitment').describe('The commitment from prepare_anchor_commitment (64 hex)'),
-        sessionId: z.string().uuid().describe('Wallet session id that signs and submits; the SAME session must reveal'),
-        contractAddress: z.string().min(1).describe('AttestationVault deployment'),
-        compiledArtifactRef: z.string().optional().describe("Contract artifact ref, defaults to 'attestation-vault'"),
-        idempotencyKey: z.string().optional().describe('Dedupes retries'),
-        sponsorSessionId: z.string().uuid().optional().describe('Optional second session that pays the dust fee'),
-      },
-    },
-    run(async (args) =>
-      client.callAction('commitDocumentAnchor', {
-        commitment: args.commitment,
         sessionId: args.sessionId,
         contractAddress: args.contractAddress,
         compiledArtifactRef: args.compiledArtifactRef,
@@ -904,16 +896,19 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         'server. params by call: attest {payloadHash, metadataHash}; anchorContentRoot ' +
         '{payloadHash, contentRoot, schemaId}; grantDisclosure {payloadHash, grantee, level 0|1|2}; ' +
         'revokeDisclosure {payloadHash, grantee}; registerPassport {passportId, ownerId}; ' +
-        'bindPassport {passportId, payloadHash}; attestCommit {commitment}; attestReveal ' +
-        '{payloadHash, metadataHash, nonce}. ZK CLAIMS, proven here with no wallet on the ' +
-        'server and no witness ever sent to it: proveFieldPredicate {payloadHash, fieldKey, ' +
-        'threshold, op 0=lessOrEqual|1=greaterOrEqual} plus merkleProof {fieldValue, fieldSalt, ' +
-        'siblings, dirs}; proveFieldEquality {payloadHash, fieldKey, expectedDigest} plus ' +
-        'merkleProof {fieldSalt, siblings, dirs}; proveFieldMembership {payloadHash, fieldKey, ' +
-        'setRoot} plus merkleProof {fieldDigest, fieldSalt, siblings, dirs, setProof}; ' +
-        'proveFieldsUnchangedExcept {payloadHashA, payloadHashB, allowedMask} and ' +
-        'proveFieldsDiffer {payloadHashA, payloadHashB, k}, both plus docPair {schema, ' +
-        'openingA, openingB}. Every witness field comes straight out of ' +
+        'bindPassport {passportId, payloadHash}. The owner-gated calls address THIS builder\'s own ' +
+        'record of the payload (the circuit derives recordKey(attesterId, payloadHash) from the ' +
+        'caller). ZK CLAIMS, proven here with no wallet on the server and no witness ever sent ' +
+        'to it, address a record explicitly: pass payloadHash (this builder\'s record) or ' +
+        'payloadHash + attesterId (another attester\'s record) or recordKey directly: ' +
+        'proveFieldPredicate {payloadHash, fieldKey, threshold, op 0=lessOrEqual|1=greaterOrEqual} ' +
+        'plus merkleProof {fieldValue, fieldSalt, siblings, dirs}; proveFieldEquality ' +
+        '{payloadHash, fieldKey, expectedDigest} plus merkleProof {fieldSalt, siblings, dirs}; ' +
+        'proveFieldMembership {payloadHash, fieldKey, setRoot} plus merkleProof {fieldDigest, ' +
+        'fieldSalt, siblings, dirs, setProof}; proveFieldsUnchangedExcept {payloadHashA, ' +
+        'payloadHashB, allowedMask} and proveFieldsDiffer {payloadHashA, payloadHashB, k} ' +
+        '(optionally attesterIdA / attesterIdB, or recordKeyA / recordKeyB), both plus docPair ' +
+        '{schema, openingA, openingB}. Every witness field comes straight out of ' +
         'prepare_document_proof. All hashes 64 hex. The built bytes are valid for ' +
         'the transaction TTL (~30 min) and against the contract state at build time: if the ' +
         'sponsor job ends CHAIN_EXECUTION_FAILED, build again.',

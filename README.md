@@ -29,7 +29,8 @@ rejects the call with 400.
 
 | MCP | NIGHTGATE | Notes |
 |---|---|---|
-| **0.5.1** | **>= 0.19.0** for width 32 | Current. Accepts the 32-slot vault: schema and opening take 16 or 32 entries, `allowedMask` up to 32 bits, `k` up to 32, and the vacuity guard is checked against the SCHEMA instead of a fixed all-ones constant. Target it with `compiledArtifactRef: 'attestation-vault-32'`. Everything else is unchanged, so a 16-slot setup keeps working against any 0.18.x server. |
+| **0.6.0** | **>= 0.24.0** | Current. Vault lineage 4 keys every record by attester AND payload: `verify_attestation` takes `attesterId` + `payloadHash` (or a bound `documentId`), `verify_predicate` takes `attesterId`, the `prove_*` tools accept an optional `attesterId` (the record the claim is proven against), `anchor_document` is one plain attest and returns `attesterId`. `prepare_anchor_commitment` and `commit_document_anchor` are gone (nothing to guard: no identity can take over another attester's record). Local building needs `@odatano/nightgate-tx` >= 0.6.0; the proof calls take `recordKey` or `payloadHash` (+ `attesterId`). Against a 0.23.x server the verify calls fail with 400 (unknown parameter). |
+| 0.5.1 | >= 0.19.0 for width 32 | Accepts the 32-slot vault: schema and opening take 16 or 32 entries, `allowedMask` up to 32 bits, `k` up to 32, and the vacuity guard is checked against the SCHEMA instead of a fixed all-ones constant. Target it with `compiledArtifactRef: 'attestation-vault-32'`. Everything else is unchanged, so a 16-slot setup keeps working against any 0.18.x server. |
 | 0.5.x | >= 0.18.0 | Adds the parallel sponsoring channel (`sponsor_unbound_transaction`, platform pool id) and LOCAL transaction building (`build_sponsorable_transaction`, `get_attester_identity`) via the optional `@odatano/nightgate-tx` >= 0.2.0 txbuilder; `sponsor_unbound_transaction` 404s against older servers. |
 | 0.4.x | >= 0.17.0 | Cross-server fee sponsoring, serial channel only (`sponsor_finalized_transaction`), custom-token identity (`derive_token_type`). |
 | 0.3.x | >= 0.16.0 (0.16.2 recommended) | Cross-root proofs, guarded anchoring, schema ids, per-field salts. Does NOT work against 0.15.x and older, which know no salt parameters. |
@@ -117,7 +118,7 @@ Configuration is environment-driven:
 |---|---|---|
 | `NIGHTGATE_BASE_URL` | `http://localhost:4004` | NIGHTGATE host app |
 | `NIGHTGATE_USERNAME` / `NIGHTGATE_PASSWORD` | unset | Basic auth (CAP dev/mocked auth) |
-| `NIGHTGATE_TOKEN` | unset | `ngat_...` agent-grant token (sent as `x-agent-token`, combinable with basic auth) or a plain bearer token |
+| `NIGHTGATE_TOKEN` | unset | **The usual credential: an ODATANO ACCESS key `oda_…`** (sent as `Authorization: Bearer`; `api.nightgate.dev` is the gateway). A raw `ngat_...` agent grant (sent as `x-agent-token`, combinable with basic auth) for a direct NIGHTGATE instance, or any other plain bearer |
 | `NIGHTGATE_SERVICE_PATH` | `/api/v1/nightgate` | OData service path |
 | `NIGHTGATE_TIMEOUT_MS` | `30000` | Per-request timeout |
 | `NIGHTGATE_SEED_HEX` | unset | Caller seed (64 or 128 hex) for `build_sponsorable_transaction`; never a tool argument. Needs `@odatano/nightgate-tx` installed |
@@ -156,24 +157,22 @@ Or in a project `.mcp.json`:
 
 | Tool | What it does |
 |---|---|
-| `verify_attestation` | Live-state check that a payload hash is attested in an AttestationVault (crawler-free, optional content-root check, optional cross-network read) |
-| `verify_predicate` | Live-state check that a ZK claim was recorded true on-chain, id-free: numeric predicates, `bytesEquality` (+ `expectedDigest`), `setMembership` (+ `setRoot`) and the cross-root kinds `documentIntegrity` / `documentDiff` (+ `payloadHashB`) |
+| `verify_attestation` | Live-state check that an attester's record of a payload hash stands in an AttestationVault: named by `attesterId` + `payloadHash` or by a bound `documentId` (crawler-free, optional content-root / schema check, optional cross-network read) |
+| `verify_predicate` | Live-state check that a ZK claim was recorded true on-chain, id-free: `attesterId` + `payloadHash` name the record; numeric predicates, `bytesEquality` (+ `expectedDigest`), `setMembership` (+ `setRoot`) and the cross-root kinds `documentIntegrity` / `documentDiff` (+ `payloadHashB`, optional `attesterIdB`) |
 | `verify_predicate_attestation` | Verify a server-issued predicate attestation by its row id |
 | `verify_document` | Verify an anchored document by document id + sha256 |
 | `prepare_document_proof` | Canonicalize a document into payloadHash + salted Merkle contentRoot + schemaId + per-field proof inputs (incl. each slot salt) + the full `opening` the cross-root proofs need (synchronous) |
 | `prepare_membership_set` | Build the canonical allow-list set tree: setRoot for verifiers, inclusion path for provers (synchronous) |
 | `attest_agent_output` | Anchor agent-output provenance (canonical envelope, third-party verifiable; async job, NIGHTGATE >= 0.14.0) |
-| `anchor_document` | Anchor a document content hash on-chain; with a `nonce` it is the guarded reveal that reclaims a front-run hash (async job) |
+| `anchor_document` | Anchor a document content hash on-chain as the session's own record, keyed by attester and hash; returns `attesterId` for verifiers (async job) |
 | `prove_field_predicate` | ZK proof that a hidden document field satisfies a threshold, without revealing it (async job) |
 | `prove_field_equality` | ZK proof that a string field carries exactly the value behind a public digest (async job) |
 | `prove_field_membership` | ZK proof that a hidden string field is one of a public allow-list, without revealing which (async job) |
 | `prove_field_predicates_batch` | Up to 8 claims on one document in ONE transaction, any mix of numeric / equality / membership / cross-root kinds (async job) |
 | `prove_document_integrity` | ZK proof that a second document differs from the anchored one ONLY in a public slot mask, values hidden (async job) |
 | `prove_document_diff` | ZK proof that two anchored documents differ at >= k of the vault's slots, without revealing which (async job) |
-| `prepare_anchor_commitment` | Compute the commitment + secret nonce for guarded anchoring (synchronous) |
-| `commit_document_anchor` | Record that commitment on-chain, so a mempool observer cannot front-run the later reveal (async job) |
 | `grant_disclosure` / `revoke_disclosure` | Attester-only on-chain disclosure ACL (async jobs) |
-| `build_sponsorable_transaction` | Build, prove and sign an AttestationVault call LOCALLY with the seed from the server environment (attest, anchorContentRoot, grant/revokeDisclosure, register/bindPassport, attestCommit/Reveal); returns the fee-unpaid bytes for the sponsor tools, unbound by default (synchronous, 20-60 s, needs `@odatano/nightgate-tx`) |
+| `build_sponsorable_transaction` | Build, prove and sign an AttestationVault call LOCALLY with the seed from the server environment (attest, anchorContentRoot, grant/revokeDisclosure, register/bindPassport, the proveField* claims against any attester's record); returns the fee-unpaid bytes for the sponsor tools, unbound by default (synchronous, 20-60 s, needs `@odatano/nightgate-tx`) |
 | `get_attester_identity` | The attester id this server builds under, derived from the seed (synchronous) |
 | `sponsor_finalized_transaction` | Submit a transaction that was built, proven and signed ELSEWHERE (e.g. with the `@odatano/nightgate-tx` txbuilder, the builder's key never leaves its machine); the sponsor session pays the dust, the effect carries the builder's identity; serial per sponsor wallet (async job) |
 | `sponsor_unbound_transaction` | Same trust shape for an UNBOUND (`bind: false`) caller transaction: the sponsor merges a dust spend from a locked backing, binds and submits, several per sponsor wallet in parallel; `sponsorSessionId` may be the platform pool id (async job) |

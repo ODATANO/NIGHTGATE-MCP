@@ -31,8 +31,6 @@ export const BUILDABLE_CALLS = [
   'revokeDisclosure',
   'registerPassport',
   'bindPassport',
-  'attestCommit',
-  'attestReveal',
   'proveFieldPredicate',
   'proveFieldEquality',
   'proveFieldMembership',
@@ -80,6 +78,7 @@ export interface BuildOutput {
 
 interface TxModules {
   createTxBuilder: (opts: any) => Promise<any>;
+  computeRecordKey: (attesterId: string, payloadHash: string) => string;
   calls: Record<string, (input: Record<string, unknown>) => unknown>;
   Contract: unknown;
 }
@@ -99,11 +98,16 @@ async function loadModules(ref: BuildableArtifact = DEFAULT_ARTIFACT): Promise<T
             ? import('@odatano/nightgate-tx/attestation-vault-32')
             : import('@odatano/nightgate-tx/attestation-vault'),
         ]);
-        return { createTxBuilder: tx.createTxBuilder as any, calls: calls as any, Contract: (vault as any).Contract };
+        return {
+          createTxBuilder: tx.createTxBuilder as any,
+          computeRecordKey: (tx as any).computeRecordKey,
+          calls: calls as any,
+          Contract: (vault as any).Contract,
+        };
       } catch (err) {
         modules.delete(ref);
         throw new Error(
-          `local building of '${ref}' needs @odatano/nightgate-tx >= 0.3.0 next to the MCP server ` +
+          `local building of '${ref}' needs @odatano/nightgate-tx >= 0.6.0 next to the MCP server ` +
           '(npm install @odatano/nightgate-tx): ' + (err instanceof Error ? err.message : String(err)),
         );
       }
@@ -175,10 +179,28 @@ function hexParam(params: Record<string, string | number>, key: string): string 
   return v.toLowerCase();
 }
 
-/** Map the tool's flat params onto the typed prepare* helper of the call kind. */
-function prepareCall(calls: TxModules['calls'], input: BuildInput, attestationSecret: Uint8Array): unknown {
+/**
+ * Map the tool's flat params onto the typed prepare* helper of the call kind.
+ * The proof helpers take the RECORD KEY of the document they prove against:
+ * `recordKey` as given, else recordKey(attesterId ?? this builder, payloadHash).
+ */
+function prepareCall(mods: TxModules, input: BuildInput, attestationSecret: Uint8Array, ownAttesterId: string): unknown {
+  const { calls } = mods;
   const p = input.params;
   const slotWidth = input.compiledArtifactRef === 'attestation-vault-32' ? 32 : 16;
+  const recordKeyOf = (keyName: string, payloadName: string, attesterName: string): string => {
+    if (typeof p[keyName] === 'string') return hexParam(p, keyName);
+    const attester = typeof p[attesterName] === 'string' ? hexParam(p, attesterName) : ownAttesterId;
+    return mods.computeRecordKey(attester, hexParam(p, payloadName));
+  };
+  const recordKey = () => recordKeyOf('recordKey', 'payloadHash', 'attesterId');
+  const recordKeyA = () => recordKeyOf('recordKeyA', 'payloadHashA', 'attesterIdA');
+  const recordKeyB = () => {
+    if (typeof p.recordKeyB === 'string') return hexParam(p, 'recordKeyB');
+    const attester = typeof p.attesterIdB === 'string' ? hexParam(p, 'attesterIdB')
+      : typeof p.attesterIdA === 'string' ? hexParam(p, 'attesterIdA') : ownAttesterId;
+    return mods.computeRecordKey(attester, hexParam(p, 'payloadHashB'));
+  };
   const witness = (what: string) => {
     if (!input.merkleProof) throw new Error(`call '${input.call}' needs merkleProof (${what}); take it from prepare_document_proof`);
     return input.merkleProof as any;
@@ -192,31 +214,31 @@ function prepareCall(calls: TxModules['calls'], input: BuildInput, attestationSe
       const op = Number(p.op);
       if (![0, 1].includes(op)) throw new Error('params.op must be 0 (lessOrEqual) or 1 (greaterOrEqual)');
       return calls.prepareProveFieldPredicate({
-        payloadHash: hexParam(p, 'payloadHash'), fieldKey: hexParam(p, 'fieldKey'),
+        recordKey: recordKey(), fieldKey: hexParam(p, 'fieldKey'),
         threshold: BigInt(p.threshold as string | number), op: BigInt(op),
         merkleProof: witness('fieldValue, fieldSalt, siblings, dirs'), attestationSecret, slotWidth,
       } as any);
     }
     case 'proveFieldEquality':
       return calls.prepareProveFieldEquality({
-        payloadHash: hexParam(p, 'payloadHash'), fieldKey: hexParam(p, 'fieldKey'),
+        recordKey: recordKey(), fieldKey: hexParam(p, 'fieldKey'),
         expectedDigest: hexParam(p, 'expectedDigest'),
         merkleProof: witness('fieldSalt, siblings, dirs'), attestationSecret, slotWidth,
       } as any);
     case 'proveFieldMembership':
       return calls.prepareProveFieldMembership({
-        payloadHash: hexParam(p, 'payloadHash'), fieldKey: hexParam(p, 'fieldKey'),
+        recordKey: recordKey(), fieldKey: hexParam(p, 'fieldKey'),
         setRoot: hexParam(p, 'setRoot'),
         merkleProof: witness('fieldDigest, fieldSalt, siblings, dirs, setProof'), attestationSecret, slotWidth,
       } as any);
     case 'proveFieldsUnchangedExcept':
       return calls.prepareProveFieldsUnchangedExcept({
-        payloadHashA: hexParam(p, 'payloadHashA'), payloadHashB: hexParam(p, 'payloadHashB'),
+        recordKeyA: recordKeyA(), recordKeyB: recordKeyB(),
         allowedMask: Number(p.allowedMask), docPair: pair(), attestationSecret, slotWidth,
       } as any);
     case 'proveFieldsDiffer':
       return calls.prepareProveFieldsDiffer({
-        payloadHashA: hexParam(p, 'payloadHashA'), payloadHashB: hexParam(p, 'payloadHashB'),
+        recordKeyA: recordKeyA(), recordKeyB: recordKeyB(),
         k: Number(p.k), docPair: pair(), attestationSecret, slotWidth,
       } as any);
     case 'attest':
@@ -234,10 +256,6 @@ function prepareCall(calls: TxModules['calls'], input: BuildInput, attestationSe
       return calls.prepareRegisterPassport({ passportId: hexParam(p, 'passportId'), ownerId: hexParam(p, 'ownerId'), attestationSecret });
     case 'bindPassport':
       return calls.prepareBindPassport({ passportId: hexParam(p, 'passportId'), payloadHash: hexParam(p, 'payloadHash'), attestationSecret });
-    case 'attestCommit':
-      return calls.prepareAttestCommit({ commitment: hexParam(p, 'commitment'), attestationSecret });
-    case 'attestReveal':
-      return calls.prepareAttestReveal({ payloadHash: hexParam(p, 'payloadHash'), metadataHash: hexParam(p, 'metadataHash'), nonce: hexParam(p, 'nonce'), attestationSecret });
   }
 }
 
@@ -246,8 +264,8 @@ export async function buildSponsorable(config: NightgateMcpConfig, input: BuildI
   const t0 = Date.now();
   const ref = input.compiledArtifactRef ?? DEFAULT_ARTIFACT;
   const b = await getBuilder(config, ref);
-  const { calls } = await loadModules(ref);
-  const call = prepareCall(calls, input, b.attestationSecret);
+  const mods = await loadModules(ref);
+  const call = prepareCall(mods, input, b.attestationSecret, String(b.attesterId));
   const built = await b.buildSponsorable({ contractAddress: input.contractAddress, call, bind: input.bind ? true : false });
   const out: BuildOutput = {
     channel: input.bind ? 'bound' : 'unbound',

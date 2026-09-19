@@ -98,7 +98,7 @@ await submit('proveFieldPredicate', 'proveFieldPredicate', {
 // 3. Anyone can check it against live contract state, with no wallet.
 for (let i = 0; ; i++) {
     const v = await call('verify_predicate', {
-        contractAddress: VAULT, payloadHash: prep.payloadHash, fieldKey: total.fieldKey,
+        contractAddress: VAULT, attesterId: me.attesterId, payloadHash: prep.payloadHash, fieldKey: total.fieldKey,
         predicate: 'greaterOrEqual', threshold: Math.round(THRESHOLD * SCALE),
         compiledArtifactRef: ARTIFACT,
     }).catch(() => null);
