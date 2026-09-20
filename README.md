@@ -1,3 +1,10 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://cdn.jsdelivr.net/npm/@odatano/brand@1/logos/nightgate-mcp-logo.svg">
+    <img src="https://cdn.jsdelivr.net/npm/@odatano/brand@1/logos/nightgate-mcp-logo-on-light.svg" alt="NIGHTGATE MCP" height="84">
+  </picture>
+</p>
+
 # @odatano/nightgate-mcp
 
 [![npm](https://img.shields.io/npm/v/@odatano/nightgate-mcp)](https://www.npmjs.com/package/@odatano/nightgate-mcp)
@@ -15,67 +22,56 @@ Wallet lifecycle (connect, send, deploy) is deliberately not exposed; writing
 without a wallet session works through fee sponsoring (build locally, a
 sponsor pays).
 
+## Quick start: the hosted API
+
+The usual way to run this server is against the hosted ODATANO ACCESS
+gateway at [api.odatano.dev](https://api.odatano.dev): no node, no plugin,
+no wallet session of your own. One `oda_…` key covers Midnight (this server)
+and Cardano (`@odatano/core-mcp`).
+
+1. Get a key at [api.odatano.dev](https://api.odatano.dev): sign in with a
+   Cardano wallet (the first key comes with free calls), redeem a giveaway
+   code, or buy a pack with tADA over x402 (`POST /keys`). The console shows
+   the key once, together with a ready `.mcp.json`.
+2. Put the key in your MCP client's config:
+
+   ```json
+   {
+     "mcpServers": {
+       "nightgate": {
+         "command": "npx",
+         "args": ["-y", "@odatano/nightgate-mcp"],
+         "env": { "ODATANO_ACCESS_KEY": "oda_..." }
+       }
+     }
+   }
+   ```
+
+   or, with Claude Code: `claude mcp add nightgate --env ODATANO_ACCESS_KEY=oda_... -- npx -y @odatano/nightgate-mcp`
+
+3. That is all: the gateway is the default URL. It sends the key as
+   `Authorization: Bearer`, swaps in the NIGHTGATE agent grant underneath
+   (sponsored writes on the platform pool included) and meters the key per
+   call; the verify lane and the prover keys under `/zk-config` are free.
+   The hosted NIGHTGATE runs on Midnight **preprod** today.
+
+What the gateway does not offer, the key cannot reach: agent grants, wallet
+sessions, contract deployment, dust registration and the sponsor pool status
+answer 403 there; this server never calls them. A 402 from the gateway
+(units exhausted) reaches the agent with the top-up hint.
+
 ## Requirements
 
-- Node.js >= 20
-- A running NIGHTGATE instance, see the compatibility matrix below
+- Node.js >= 20 (`npx` fetches the server, nothing to install)
+- For `build_sponsorable_transaction`: `@odatano/nightgate-tx` installed next
+  to the server and `NIGHTGATE_SEED_HEX` set (see the sponsoring section)
 
-## Compatibility
+## Writing on-chain: fee sponsoring
 
-Pick the MCP line that matches your NIGHTGATE server. The pairing is not
-cosmetic: from NIGHTGATE 0.16.0 on, content-tree leaves are SALTED, so every
-field proof must carry its slot salt. An older MCP omits it and the server
-rejects the call with 400.
-
-| MCP | NIGHTGATE | Notes |
-|---|---|---|
-| **0.6.0** | **>= 0.24.0** | Current. Vault lineage 4 keys every record by attester AND payload: `verify_attestation` takes `attesterId` + `payloadHash` (or a bound `documentId`), `verify_predicate` takes `attesterId`, the `prove_*` tools accept an optional `attesterId` (the record the claim is proven against), `anchor_document` is one plain attest and returns `attesterId`. `prepare_anchor_commitment` and `commit_document_anchor` are gone (nothing to guard: no identity can take over another attester's record). Local building needs `@odatano/nightgate-tx` >= 0.6.0; the proof calls take `recordKey` or `payloadHash` (+ `attesterId`). Against a 0.23.x server the verify calls fail with 400 (unknown parameter). |
-| 0.5.1 | >= 0.19.0 for width 32 | Accepts the 32-slot vault: schema and opening take 16 or 32 entries, `allowedMask` up to 32 bits, `k` up to 32, and the vacuity guard is checked against the SCHEMA instead of a fixed all-ones constant. Target it with `compiledArtifactRef: 'attestation-vault-32'`. Everything else is unchanged, so a 16-slot setup keeps working against any 0.18.x server. |
-| 0.5.x | >= 0.18.0 | Adds the parallel sponsoring channel (`sponsor_unbound_transaction`, platform pool id) and LOCAL transaction building (`build_sponsorable_transaction`, `get_attester_identity`) via the optional `@odatano/nightgate-tx` >= 0.2.0 txbuilder; `sponsor_unbound_transaction` 404s against older servers. |
-| 0.4.x | >= 0.17.0 | Cross-server fee sponsoring, serial channel only (`sponsor_finalized_transaction`), custom-token identity (`derive_token_type`). |
-| 0.3.x | >= 0.16.0 (0.16.2 recommended) | Cross-root proofs, guarded anchoring, schema ids, per-field salts. Does NOT work against 0.15.x and older, which know no salt parameters. |
-| 0.2.x | 0.15.x | Bytes equality and set membership on unsalted leaves. Against 0.16.0 and newer every field proof fails with "fieldSalt is required". |
-| 0.1.x | 0.14.x | Anchoring, numeric field predicates, disclosure, agent provenance. |
-
-The verification tools are the exception: they only read live contract state
-and keep working across the whole range, they simply cannot express the
-newer claim kinds on an older server.
-
-## Getting a NIGHTGATE instance
-
-The fastest way is the official Docker image; no Node setup, no host app
-(published from the NIGHTGATE repo on every release, details in its
-`docs/docker.md`):
-
-```bash
-docker run -d --name nightgate -p 4004:4004 \
-  -e ENCRYPTION_KEY=$(openssl rand -hex 32) \
-  -e NIGHTGATE_HTTP_PASSWORD=change-me \
-  -v nightgate-data:/data \
-  ghcr.io/odatano/nightgate:latest
-```
-
-That container targets Midnight preprod by default, serves with HTTP basic
-auth (`nightgate` / your password), persists its database in the
-`nightgate-data` volume, and proves in-process (wasm), so no proof server
-is needed to start. Point this MCP server at it with:
-
-```bash
-NIGHTGATE_BASE_URL=http://localhost:4004
-NIGHTGATE_USERNAME=nightgate
-NIGHTGATE_PASSWORD=change-me
-```
-
-For agent operation, create a scoped grant once (as the operator, e.g. via
-curl against `createAgentGrant`) and hand the returned `ngat_...` token to
-the agent as `NIGHTGATE_TOKEN`; the write tools are then limited to the
-grant's allowlist, budget and pinned session.
-
-### Agents on a hosted NIGHTGATE (fee sponsoring)
-
-An agent does not need a wallet session of its own to write on-chain. With a
-grant that allows `sponsorUnboundTransaction` (or `sponsorFinalizedTransaction`)
-the flow is:
+An agent does not need a wallet session of its own to write on-chain. Through
+the gateway the key already carries a grant for `sponsorUnboundTransaction`
+and `sponsorFinalizedTransaction` on the platform sponsor pool; against a
+direct instance the grant is the `ngat_…` token. The flow is:
 
 1. `build_sponsorable_transaction`: build, prove and sign the contract call
    LOCALLY (the MCP server wraps the
@@ -99,26 +95,78 @@ One sponsor wallet serves several agents at once (parallel channel, 0.18.0).
 A job that ends `failed` with `CHAIN_EXECUTION_FAILED` landed on-chain but its
 call did not apply (two calls on the same contract in one block): build again
 against the current state and sponsor again; never resubmit the same bytes.
-On a host behind transport auth set `NIGHTGATE_USERNAME`/`NIGHTGATE_PASSWORD`
-next to the token, the two combine.
+On a direct host behind transport auth set `ODATANO_ACCESS_USER` /
+`ODATANO_ACCESS_PASSWORD` next to the token, the two combine.
 
-Alternatively any CAP app using the `@odatano/nightgate` plugin works,
-e.g. the NIGHTGATE repo itself via `npm run dev`.
 
-## Setup
+## Run your own instance (optional)
+
+Point `ODATANO_ACCESS_URL` at any NIGHTGATE host app instead of the gateway
+(see the compatibility table below for the version pairing). The fastest way
+is the official Docker image; no Node setup, no host app (published from the
+NIGHTGATE repo on every release, details in its `docs/docker.md`):
+
+```bash
+docker run -d --name nightgate -p 4004:4004 \
+  -e ENCRYPTION_KEY=$(openssl rand -hex 32) \
+  -e NIGHTGATE_HTTP_PASSWORD=change-me \
+  -v nightgate-data:/data \
+  ghcr.io/odatano/nightgate:latest
+```
+
+That container targets Midnight preprod by default, serves with HTTP basic
+auth (`nightgate` / your password), persists its database in the
+`nightgate-data` volume, and proves in-process (wasm), so no proof server
+is needed to start. Point this MCP server at it with:
+
+```bash
+ODATANO_ACCESS_URL=http://localhost:4004
+ODATANO_ACCESS_USER=nightgate
+ODATANO_ACCESS_PASSWORD=change-me
+```
+
+For agent operation, create a scoped grant once (as the operator, e.g. via
+curl against `createAgentGrant`) and hand the returned `ngat_...` token to
+the agent as `ODATANO_ACCESS_KEY`; the write tools are then limited to the
+grant's allowlist, budget and pinned session. Any CAP app using the
+`@odatano/nightgate` plugin works too, e.g. the NIGHTGATE repo itself via
+`npm run dev`.
+
+## Compatibility
+
+Pick the MCP line that matches your NIGHTGATE server. The pairing is not
+cosmetic: from NIGHTGATE 0.16.0 on, content-tree leaves are SALTED, so every
+field proof must carry its slot salt. An older MCP omits it and the server
+rejects the call with 400.
+
+| MCP | NIGHTGATE | Notes |
+|---|---|---|
+| **0.6.0** | **>= 0.24.0** | Current. Vault lineage 4 keys every record by attester AND payload: `verify_attestation` takes `attesterId` + `payloadHash` (or a bound `documentId`), `verify_predicate` takes `attesterId`, the `prove_*` tools accept an optional `attesterId` (the record the claim is proven against), `anchor_document` is one plain attest and returns `attesterId`. `prepare_anchor_commitment` and `commit_document_anchor` are gone (nothing to guard: no identity can take over another attester's record). Local building needs `@odatano/nightgate-tx` >= 0.6.0; the proof calls take `recordKey` or `payloadHash` (+ `attesterId`). Against a 0.23.x server the verify calls fail with 400 (unknown parameter). |
+| 0.5.1 | >= 0.19.0 for width 32 | Accepts the 32-slot vault: schema and opening take 16 or 32 entries, `allowedMask` up to 32 bits, `k` up to 32, and the vacuity guard is checked against the SCHEMA instead of a fixed all-ones constant. Target it with `compiledArtifactRef: 'attestation-vault-32'`. Everything else is unchanged, so a 16-slot setup keeps working against any 0.18.x server. |
+| 0.5.x | >= 0.18.0 | Adds the parallel sponsoring channel (`sponsor_unbound_transaction`, platform pool id) and LOCAL transaction building (`build_sponsorable_transaction`, `get_attester_identity`) via the optional `@odatano/nightgate-tx` >= 0.2.0 txbuilder; `sponsor_unbound_transaction` 404s against older servers. |
+| 0.4.x | >= 0.17.0 | Cross-server fee sponsoring, serial channel only (`sponsor_finalized_transaction`), custom-token identity (`derive_token_type`). |
+| 0.3.x | >= 0.16.0 (0.16.2 recommended) | Cross-root proofs, guarded anchoring, schema ids, per-field salts. Does NOT work against 0.15.x and older, which know no salt parameters. |
+| 0.2.x | 0.15.x | Bytes equality and set membership on unsalted leaves. Against 0.16.0 and newer every field proof fails with "fieldSalt is required". |
+| 0.1.x | 0.14.x | Anchoring, numeric field predicates, disclosure, agent provenance. |
+
+The verification tools are the exception: they only read live contract state
+and keep working across the whole range, they simply cannot express the
+newer claim kinds on an older server.
+
+## Development setup
 
 ```bash
 npm install
 npm run build
 ```
 
-Configuration is environment-driven:
+Configuration is environment-driven (the same variables in an MCP client's `env` block):
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `NIGHTGATE_BASE_URL` | `http://localhost:4004` | NIGHTGATE host app |
-| `NIGHTGATE_USERNAME` / `NIGHTGATE_PASSWORD` | unset | Basic auth (CAP dev/mocked auth) |
-| `NIGHTGATE_TOKEN` | unset | **The usual credential: an ODATANO ACCESS key `oda_…`** (sent as `Authorization: Bearer`; `api.nightgate.dev` is the gateway). A raw `ngat_...` agent grant (sent as `x-agent-token`, combinable with basic auth) for a direct NIGHTGATE instance, or any other plain bearer |
+| `ODATANO_ACCESS_URL` | `https://api.odatano.dev` | The ODATANO ACCESS gateway, or a direct NIGHTGATE host app (`http://localhost:4004` for `cds watch`) |
+| `ODATANO_ACCESS_USER` / `ODATANO_ACCESS_PASSWORD` | unset | Basic auth against a direct instance (CAP dev/mocked auth); not for agents |
+| `ODATANO_ACCESS_KEY` | unset | **The credential: an ODATANO ACCESS key `oda_…`** (sent as `Authorization: Bearer`; buy one at `POST https://api.odatano.dev/keys`, redeem a code, or sign in at the console). The same variable configures `@odatano/core-mcp`. Against a direct NIGHTGATE instance a raw `ngat_...` agent grant (sent as `x-agent-token`, combinable with basic auth) or any other bearer goes here too |
 | `NIGHTGATE_SERVICE_PATH` | `/api/v1/nightgate` | OData service path |
 | `NIGHTGATE_TIMEOUT_MS` | `30000` | Per-request timeout |
 | `NIGHTGATE_SEED_HEX` | unset | Caller seed (64 or 128 hex) for `build_sponsorable_transaction`; never a tool argument. Needs `@odatano/nightgate-tx` installed |
@@ -126,32 +174,6 @@ Configuration is environment-driven:
 | `NIGHTGATE_INDEXER_HTTP_URL` / `NIGHTGATE_INDEXER_WS_URL` / `NIGHTGATE_NODE_URL` | public Midnight endpoints of the network | Builder's indexer + node |
 | `NIGHTGATE_ZK_CONFIG_BASE_URL` | `<base url>/zk-config/attestation-vault` | Where the builder fetches prover keys (cached on disk, `NIGHTGATE_ZK_CACHE_DIR`) |
 | `NIGHTGATE_PROOF_SERVER_URL` | unset | Prove contract circuits on a proof server instead of in-process wasm |
-
-## Use with Claude Code
-
-```bash
-claude mcp add nightgate \
-  --env NIGHTGATE_BASE_URL=http://localhost:4004 \
-  --env NIGHTGATE_USERNAME=alice \
-  -- node /path/to/NIGHTGATE-MCP/dist/index.js
-```
-
-Or in a project `.mcp.json`:
-
-```json
-{
-  "mcpServers": {
-    "nightgate": {
-      "command": "node",
-      "args": ["/path/to/NIGHTGATE-MCP/dist/index.js"],
-      "env": {
-        "NIGHTGATE_BASE_URL": "http://localhost:4004",
-        "NIGHTGATE_USERNAME": "alice"
-      }
-    }
-  }
-}
-```
 
 ## Tools
 
@@ -194,7 +216,7 @@ Runs an in-memory MCP client against the server: asserts the tool set,
 schemas, and argument validation. Optional live round-trip:
 
 ```bash
-NIGHTGATE_LIVE=1 NIGHTGATE_BASE_URL=... NIGHTGATE_USERNAME=... \
+NIGHTGATE_LIVE=1 ODATANO_ACCESS_URL=... ODATANO_ACCESS_USER=... \
 NIGHTGATE_TEST_CONTRACT=<vault address> NIGHTGATE_TEST_PAYLOAD_HASH=<64 hex> \
 npm run integration
 ```
@@ -205,7 +227,7 @@ tools with a grant token only: `get_attester_identity`,
 `get_job_status`, `verify_attestation` (the attester id must be ours):
 
 ```bash
-NIGHTGATE_BASE_URL=https://api.nightgate.dev NIGHTGATE_TOKEN=ngat_... \
+ODATANO_ACCESS_KEY=oda_... \
 NIGHTGATE_SEED_HEX=<64 or 128 hex, a throwaway is fine> \
 NIGHTGATE_VAULT=<vault address> NIGHTGATE_SPONSOR_SESSION_ID=<sponsor or pool id> \
 npm run live:sponsor-unbound

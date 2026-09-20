@@ -26,7 +26,7 @@ const VAULT = process.env.NIGHTGATE_VAULT;
 const ARTIFACT = process.env.NIGHTGATE_VAULT_ARTIFACT || 'attestation-vault';
 const SPONSOR = process.env.NIGHTGATE_SPONSOR_SESSION_ID || '00000000-0000-0000-0000-706f6f6c0000';
 const fail = (m) => { console.error(`FAIL ${m}`); process.exit(1); };
-if (!VAULT || !process.env.NIGHTGATE_BASE_URL) fail('need NIGHTGATE_BASE_URL and NIGHTGATE_VAULT');
+if (!VAULT || !process.env.ODATANO_ACCESS_URL) fail('need ODATANO_ACCESS_URL and NIGHTGATE_VAULT');
 
 const env = { ...process.env, NIGHTGATE_TIMEOUT_MS: process.env.NIGHTGATE_TIMEOUT_MS || '120000' };
 if (!env.NIGHTGATE_SEED_HEX) env.NIGHTGATE_SEED_HEX = randomBytes(64).toString('hex');

@@ -6,10 +6,32 @@ export class NightgateApiError extends Error {
     public readonly status: number,
     public readonly code: string | undefined,
     message: string,
+    /** Extra fields of a gateway error body (unitsLeft, price, topup, products, validUntil, retryAfterSeconds). */
+    public readonly detail?: Record<string, unknown>,
   ) {
     super(message);
     this.name = 'NightgateApiError';
   }
+}
+
+/**
+ * Two error shapes reach the client: CAP's `{ error: { code, message } }`
+ * from NIGHTGATE itself, and the ODATANO ACCESS gateway's `{ error: "<text>",
+ * ...detail }` (401 key problems, 402 units exhausted with a top-up hint,
+ * 403 closed action or product not on the key, 429 with Retry-After).
+ */
+export function apiError(status: number, payload: unknown, headers: Headers, fallback: string): NightgateApiError {
+  const body = (payload && typeof payload === 'object' ? payload : {}) as Record<string, unknown>;
+  const err = body.error;
+  if (typeof err === 'string') {
+    const { error: _e, ...rest } = body;
+    const detail: Record<string, unknown> = { ...rest };
+    const retry = headers.get('retry-after');
+    if (retry) detail.retryAfterSeconds = Number(retry);
+    return new NightgateApiError(status, undefined, err, Object.keys(detail).length ? detail : undefined);
+  }
+  const e = (err ?? {}) as { code?: string; message?: string };
+  return new NightgateApiError(status, e.code, e.message ?? fallback);
 }
 
 /**
@@ -91,12 +113,7 @@ export class NightgateClient {
     }
 
     if (!response.ok) {
-      const err = (payload as { error?: { code?: string; message?: string } }).error;
-      throw new NightgateApiError(
-        response.status,
-        err?.code,
-        err?.message ?? `NIGHTGATE request failed with HTTP ${response.status}`,
-      );
+      throw apiError(response.status, payload, response.headers, `NIGHTGATE request failed with HTTP ${response.status}`);
     }
     return stripODataNoise(payload);
   }

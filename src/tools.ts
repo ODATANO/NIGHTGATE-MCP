@@ -1085,7 +1085,7 @@ function wrapHandler(_client: NightgateClient) {
         return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
       } catch (err) {
         if (err instanceof NightgateApiError) {
-          const detail = { httpStatus: err.status, code: err.code ?? null, message: err.message };
+          const detail = { httpStatus: err.status, code: err.code ?? null, message: err.message, ...(err.detail ?? {}) };
           return { content: [{ type: 'text', text: JSON.stringify(detail, null, 2) }], isError: true };
         }
         const message = err instanceof Error ? err.message : String(err);

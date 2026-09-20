@@ -3,7 +3,7 @@
  * builds the server, connects an MCP client over an in-memory transport,
  * lists the tools and asserts the phase-A tool set is present with schemas.
  *
- * Live mode (optional): set NIGHTGATE_LIVE=1 plus NIGHTGATE_BASE_URL and
+ * Live mode (optional): set NIGHTGATE_LIVE=1 plus ODATANO_ACCESS_URL and
  * credentials, and provide NIGHTGATE_TEST_CONTRACT + NIGHTGATE_TEST_ATTESTER_ID +
  * NIGHTGATE_TEST_PAYLOAD_HASH to round-trip verify_attestation against a
  * running NIGHTGATE server.

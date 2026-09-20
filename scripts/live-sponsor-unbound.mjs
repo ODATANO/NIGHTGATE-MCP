@@ -11,7 +11,7 @@
  *
  * `@odatano/nightgate-tx` is a devDependency here, so `npm install` is enough.
  *
- *   NIGHTGATE_BASE_URL=https://api.nightgate.dev NIGHTGATE_TOKEN=ngat_... \
+ *   ODATANO_ACCESS_URL=https://api.odatano.dev ODATANO_ACCESS_KEY=oda_... \
  *   NIGHTGATE_SEED_HEX=<64 or 128 hex, a throwaway is fine> \
  *   NIGHTGATE_VAULT=<vault address> NIGHTGATE_SPONSOR_SESSION_ID=<sponsor or pool id> \
  *   npm run live:sponsor-unbound
@@ -28,11 +28,11 @@ const SPONSOR = process.env.NIGHTGATE_SPONSOR_SESSION_ID || '00000000-0000-0000-
 // An agent grant token is the POINT of this lane, but a hosted server behind
 // basic auth has to be testable too, so either credential set is accepted and
 // the one in use is printed.
-const AUTH = process.env.NIGHTGATE_TOKEN ? 'agent-grant token'
-  : (process.env.NIGHTGATE_USERNAME && process.env.NIGHTGATE_PASSWORD) ? 'basic auth'
+const AUTH = process.env.ODATANO_ACCESS_KEY ? 'access key / agent-grant token'
+  : (process.env.ODATANO_ACCESS_USER && process.env.ODATANO_ACCESS_PASSWORD) ? 'basic auth'
     : null;
-if (!process.env.NIGHTGATE_BASE_URL || !VAULT || !AUTH) {
-  console.error('need NIGHTGATE_BASE_URL, NIGHTGATE_VAULT and either NIGHTGATE_TOKEN or NIGHTGATE_USERNAME + NIGHTGATE_PASSWORD (+ NIGHTGATE_SEED_HEX, generated when absent)');
+if (!process.env.ODATANO_ACCESS_URL || !VAULT || !AUTH) {
+  console.error('need ODATANO_ACCESS_URL, NIGHTGATE_VAULT and either ODATANO_ACCESS_KEY or ODATANO_ACCESS_USER + ODATANO_ACCESS_PASSWORD (+ NIGHTGATE_SEED_HEX, generated when absent)');
   process.exit(1);
 }
 const env = { ...process.env, NIGHTGATE_TIMEOUT_MS: process.env.NIGHTGATE_TIMEOUT_MS || '120000' };

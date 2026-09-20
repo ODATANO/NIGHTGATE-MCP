@@ -6,6 +6,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 The server compatibility table in the README says which NIGHTGATE each
 version needs.
 
+## [0.7.0] - 2026-09-20
+
+### Changed (breaking)
+
+- **One connection env for both ODATANO MCP servers.** `ODATANO_ACCESS_URL`
+  (default `https://api.odatano.dev`, the gateway), `ODATANO_ACCESS_KEY`
+  (the `oda_…` key, or an `ngat_…` grant / other bearer against a direct
+  instance) and `ODATANO_ACCESS_USER` / `ODATANO_ACCESS_PASSWORD` (basic
+  auth for a direct instance) replace `NIGHTGATE_BASE_URL`,
+  `NIGHTGATE_TOKEN`, `NIGHTGATE_USERNAME` and `NIGHTGATE_PASSWORD`; the old
+  names are not read any more. `@odatano/core-mcp` 0.3.0 reads the same
+  four, so an `.mcp.json` needs one key for both chains and no URL. The
+  other `NIGHTGATE_*` variables (network, seed, indexer, zk-config, proof
+  server, timeout, service path) are unchanged.
+- **Gateway error bodies reach the agent.** The ODATANO ACCESS gateway
+  answers with `{ error: "<text>", ...detail }`; the client now keeps the
+  text as the message and hands the detail (`unitsLeft`, `price`, the
+  `topup` hint, `products`, `validUntil`, `retryAfterSeconds` from
+  `Retry-After`) through to the tool error, so a 402 says how to top up
+  instead of "request failed with HTTP 402".
+- **The hosted API is the documented default.** README: quick start with a
+  key from api.odatano.dev first, sponsoring through the gateway's platform
+  pool, own instance second; the server warns at startup when the gateway
+  is the target and no key is set. Server version constant follows the
+  package.
+
 ## [0.6.1] - 2026-09-19
 
 ### Changed

@@ -1,18 +1,22 @@
 /**
- * Server configuration, environment-driven so the same binary works for
- * local dev (basic auth against a `cds watch` instance) and for a deployed
- * NIGHTGATE behind a reverse proxy (bearer token, phase B agent grants).
+ * Server configuration, environment-driven. The connection variables are the
+ * same for every ODATANO MCP server (ODATANO_ACCESS_*): one key from
+ * https://api.odatano.dev configures the Midnight and the Cardano server alike.
+ * A direct NIGHTGATE instance (local `cds watch`, an own deployment) is reached
+ * by pointing ODATANO_ACCESS_URL at it.
  */
 export interface NightgateMcpConfig {
-  /** Base URL of the NIGHTGATE host app, e.g. http://localhost:4004 */
+  /** Base URL: the ODATANO ACCESS gateway (default https://api.odatano.dev) or a direct NIGHTGATE host app. */
   baseUrl: string;
   /**
-   * Token credential. An `ngat_...` value is a NIGHTGATE agent-grant token
-   * (sent as `x-agent-token`, optionally alongside basic transport auth);
-   * anything else is sent as a plain `Authorization: Bearer` header.
+   * ODATANO_ACCESS_KEY. The usual value is an ODATANO ACCESS key (`oda_...`),
+   * sent as `Authorization: Bearer`; the gateway swaps in the agent grant.
+   * Against a direct NIGHTGATE instance an `ngat_...` agent-grant token goes
+   * as `x-agent-token` (optionally alongside basic transport auth); anything
+   * else is a plain bearer.
    */
   token?: string;
-  /** Basic-auth credentials for dev/mocked CAP auth. */
+  /** ODATANO_ACCESS_USER / _PASSWORD: basic auth for a direct instance (CAP dev/mocked auth); never for agents. */
   username?: string;
   password?: string;
   /** OData service path of the main Nightgate service. */
@@ -37,7 +41,7 @@ export interface NightgateMcpConfig {
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): NightgateMcpConfig {
-  const baseUrl = (env.NIGHTGATE_BASE_URL ?? 'http://localhost:4004').replace(/\/+$/, '');
+  const baseUrl = (env.ODATANO_ACCESS_URL || 'https://api.odatano.dev').replace(/\/+$/, '');
   const timeoutMs = Number(env.NIGHTGATE_TIMEOUT_MS ?? 30000);
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
     throw new Error(`Invalid NIGHTGATE_TIMEOUT_MS: ${env.NIGHTGATE_TIMEOUT_MS}`);
@@ -52,9 +56,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): NightgateMcpCo
   }
   return {
     baseUrl,
-    token: env.NIGHTGATE_TOKEN || undefined,
-    username: env.NIGHTGATE_USERNAME || undefined,
-    password: env.NIGHTGATE_PASSWORD || undefined,
+    token: env.ODATANO_ACCESS_KEY || undefined,
+    username: env.ODATANO_ACCESS_USER || undefined,
+    password: env.ODATANO_ACCESS_PASSWORD || undefined,
     servicePath: env.NIGHTGATE_SERVICE_PATH ?? '/api/v1/nightgate',
     timeoutMs,
     seedHex,

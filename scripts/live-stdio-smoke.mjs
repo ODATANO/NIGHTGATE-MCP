@@ -19,7 +19,7 @@ const fail = (m) => { console.error(`FAIL ${m}`); process.exit(1); };
 
 // Hand the child exactly what an MCP client's `env` block would carry.
 const pass = [
-  'NIGHTGATE_BASE_URL', 'NIGHTGATE_TOKEN', 'NIGHTGATE_USERNAME', 'NIGHTGATE_PASSWORD',
+  'ODATANO_ACCESS_URL', 'ODATANO_ACCESS_KEY', 'ODATANO_ACCESS_USER', 'ODATANO_ACCESS_PASSWORD',
   'NIGHTGATE_NETWORK', 'NIGHTGATE_SEED_HEX', 'NIGHTGATE_TIMEOUT_MS',
   'NIGHTGATE_INDEXER_HTTP_URL', 'NIGHTGATE_INDEXER_WS_URL', 'NIGHTGATE_NODE_URL',
   'NIGHTGATE_ZK_CONFIG_BASE_URL', 'NIGHTGATE_ZK_CACHE_DIR', 'NIGHTGATE_PROOF_SERVER_URL',
@@ -50,7 +50,7 @@ console.log('OK   build_sponsorable_transaction advertises both vault lineages')
 
 // A real read against the configured server, over the transport.
 const VAULT = process.env.NIGHTGATE_VAULT;
-if (VAULT && process.env.NIGHTGATE_BASE_URL) {
+if (VAULT && process.env.ODATANO_ACCESS_URL) {
   const r = await client.callTool({
     name: 'verify_attestation',
     arguments: {
@@ -65,7 +65,7 @@ if (VAULT && process.env.NIGHTGATE_BASE_URL) {
   if (typeof parsed.attested !== 'boolean') fail(`unexpected shape: ${text}`);
   console.log(`OK   live read through the stdio server: attested=${parsed.attested} (an unattested hash, so false is correct)`);
 } else {
-  console.log('SKIP live read (set NIGHTGATE_BASE_URL + NIGHTGATE_VAULT)');
+  console.log('SKIP live read (set ODATANO_ACCESS_URL + NIGHTGATE_VAULT)');
 }
 
 await client.close();
