@@ -1077,7 +1077,7 @@ type ToolResult = {
  * tool errors (isError) with status + OData code so the agent can react
  * (e.g. 401 -> credentials, 429 -> back off) instead of crashing the call.
  */
-function wrapHandler(_client: NightgateClient) {
+export function wrapHandler(_client: NightgateClient) {
   return function run<A>(fn: (args: A) => Promise<unknown>) {
     return async (args: A): Promise<ToolResult> => {
       try {

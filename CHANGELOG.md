@@ -6,6 +6,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 The server compatibility table in the README says which NIGHTGATE each
 version needs.
 
+## [Unreleased]
+
+## [0.8.0] - 2026-09-23
+
+### Added
+
+- **Analytics tools over ODATANO ASTRA** (`analytics_overview`, `analytics_key_figures`,
+  `analytics_daily`, `analytics_top_block_producers`, `analytics_metrics`, `analytics_metric`,
+  `analytics_series`, `analytics_compare`, `analytics_anomalies`), registered when the host
+  serves ASTRA at `ODATANO_ANALYTICS_URL` (default: the gateway's `/odata/v4/astra`). Same key,
+  one unit per read, chain pinned to Midnight; `analytics_compare` puts Cardano next to it.
+
+### Changed
+
+- **Default gateway host is `https://api.preprod.odatano.dev`** (one host per
+  network; `api.odatano.dev` now only redirects there with a 307). Node drops
+  the `Authorization` header on a cross-host redirect, so the old default
+  would answer 401 for every call: set `ODATANO_ACCESS_URL` explicitly on
+  older versions, or upgrade. The missing-key warning fires for any
+  `api.<network>.odatano.dev` host.
+
 ## [0.7.0] - 2026-09-20
 
 ### Changed (breaking)

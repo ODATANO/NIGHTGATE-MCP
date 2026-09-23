@@ -1,12 +1,12 @@
 /**
  * Server configuration, environment-driven. The connection variables are the
  * same for every ODATANO MCP server (ODATANO_ACCESS_*): one key from
- * https://api.odatano.dev configures the Midnight and the Cardano server alike.
+ * https://api.preprod.odatano.dev configures the Midnight and the Cardano server alike.
  * A direct NIGHTGATE instance (local `cds watch`, an own deployment) is reached
  * by pointing ODATANO_ACCESS_URL at it.
  */
 export interface NightgateMcpConfig {
-  /** Base URL: the ODATANO ACCESS gateway (default https://api.odatano.dev) or a direct NIGHTGATE host app. */
+  /** Base URL: the ODATANO ACCESS gateway (default https://api.preprod.odatano.dev) or a direct NIGHTGATE host app. */
   baseUrl: string;
   /**
    * ODATANO_ACCESS_KEY. The usual value is an ODATANO ACCESS key (`oda_...`),
@@ -21,6 +21,12 @@ export interface NightgateMcpConfig {
   password?: string;
   /** OData service path of the main Nightgate service. */
   servicePath: string;
+  /**
+   * Absolute URL of ODATANO ASTRA, the analytics service. Default `<baseUrl>/odata/v4/astra`,
+   * which is where the gateway serves it; an own deployment sets ODATANO_ANALYTICS_URL to its
+   * ASTRA instance (its own app on its own port), or leaves it and gets no analytics tools.
+   */
+  analyticsUrl: string;
   /** Request timeout in milliseconds. */
   timeoutMs: number;
 
@@ -41,7 +47,7 @@ export interface NightgateMcpConfig {
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): NightgateMcpConfig {
-  const baseUrl = (env.ODATANO_ACCESS_URL || 'https://api.odatano.dev').replace(/\/+$/, '');
+  const baseUrl = (env.ODATANO_ACCESS_URL || 'https://api.preprod.odatano.dev').replace(/\/+$/, '');
   const timeoutMs = Number(env.NIGHTGATE_TIMEOUT_MS ?? 30000);
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
     throw new Error(`Invalid NIGHTGATE_TIMEOUT_MS: ${env.NIGHTGATE_TIMEOUT_MS}`);
@@ -54,12 +60,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): NightgateMcpCo
   if (seedHex && !/^([0-9a-fA-F]{64}|[0-9a-fA-F]{128})$/.test(seedHex)) {
     throw new Error('Invalid NIGHTGATE_SEED_HEX: expected 64 or 128 hex characters');
   }
+  const analyticsUrl = (env.ODATANO_ANALYTICS_URL || `${baseUrl}/odata/v4/astra`).replace(/\/+$/, '');
   return {
     baseUrl,
     token: env.ODATANO_ACCESS_KEY || undefined,
     username: env.ODATANO_ACCESS_USER || undefined,
     password: env.ODATANO_ACCESS_PASSWORD || undefined,
     servicePath: env.NIGHTGATE_SERVICE_PATH ?? '/api/v1/nightgate',
+    analyticsUrl,
     timeoutMs,
     seedHex,
     network,

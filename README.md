@@ -25,11 +25,11 @@ sponsor pays).
 ## Quick start: the hosted API
 
 The usual way to run this server is against the hosted ODATANO ACCESS
-gateway at [api.odatano.dev](https://api.odatano.dev): no node, no plugin,
+gateway at [api.preprod.odatano.dev](https://api.preprod.odatano.dev): no node, no plugin,
 no wallet session of your own. One `oda_…` key covers Midnight (this server)
 and Cardano (`@odatano/core-mcp`).
 
-1. Get a key at [api.odatano.dev](https://api.odatano.dev): sign in with a
+1. Get a key at [api.preprod.odatano.dev](https://api.preprod.odatano.dev): sign in with a
    Cardano wallet (the first key comes with free calls), redeem a giveaway
    code, or buy a pack with tADA over x402 (`POST /keys`). The console shows
    the key once, together with a ready `.mcp.json`.
@@ -141,7 +141,9 @@ rejects the call with 400.
 
 | MCP | NIGHTGATE | Notes |
 |---|---|---|
-| **0.6.0** | **>= 0.24.0** | Current. Vault lineage 4 keys every record by attester AND payload: `verify_attestation` takes `attesterId` + `payloadHash` (or a bound `documentId`), `verify_predicate` takes `attesterId`, the `prove_*` tools accept an optional `attesterId` (the record the claim is proven against), `anchor_document` is one plain attest and returns `attesterId`. `prepare_anchor_commitment` and `commit_document_anchor` are gone (nothing to guard: no identity can take over another attester's record). Local building needs `@odatano/nightgate-tx` >= 0.6.0; the proof calls take `recordKey` or `payloadHash` (+ `attesterId`). Against a 0.23.x server the verify calls fail with 400 (unknown parameter). |
+| **0.8.0** | **>= 0.24.0** | Current. Analytics tools over ODATANO ASTRA (`analytics_*`), registered when the gateway serves it; same key, one unit per read. Same server range as 0.7.0. |
+| 0.7.0 | >= 0.24.0 | One connection env for both ODATANO MCP servers: `ODATANO_ACCESS_URL`, `ODATANO_ACCESS_KEY`, `ODATANO_ACCESS_USER` / `ODATANO_ACCESS_PASSWORD` replace `NIGHTGATE_BASE_URL`, `NIGHTGATE_TOKEN`, `NIGHTGATE_USERNAME` and `NIGHTGATE_PASSWORD`. Gateway error bodies (401 / 402 / 403 / 429) pass through to the agent. Same server range as 0.6.0. |
+| 0.6.0 | >= 0.24.0 | Vault lineage 4 keys every record by attester AND payload: `verify_attestation` takes `attesterId` + `payloadHash` (or a bound `documentId`), `verify_predicate` takes `attesterId`, the `prove_*` tools accept an optional `attesterId` (the record the claim is proven against), `anchor_document` is one plain attest and returns `attesterId`. `prepare_anchor_commitment` and `commit_document_anchor` are gone (nothing to guard: no identity can take over another attester's record). Local building needs `@odatano/nightgate-tx` >= 0.6.0; the proof calls take `recordKey` or `payloadHash` (+ `attesterId`). Against a 0.23.x server the verify calls fail with 400 (unknown parameter). |
 | 0.5.1 | >= 0.19.0 for width 32 | Accepts the 32-slot vault: schema and opening take 16 or 32 entries, `allowedMask` up to 32 bits, `k` up to 32, and the vacuity guard is checked against the SCHEMA instead of a fixed all-ones constant. Target it with `compiledArtifactRef: 'attestation-vault-32'`. Everything else is unchanged, so a 16-slot setup keeps working against any 0.18.x server. |
 | 0.5.x | >= 0.18.0 | Adds the parallel sponsoring channel (`sponsor_unbound_transaction`, platform pool id) and LOCAL transaction building (`build_sponsorable_transaction`, `get_attester_identity`) via the optional `@odatano/nightgate-tx` >= 0.2.0 txbuilder; `sponsor_unbound_transaction` 404s against older servers. |
 | 0.4.x | >= 0.17.0 | Cross-server fee sponsoring, serial channel only (`sponsor_finalized_transaction`), custom-token identity (`derive_token_type`). |
@@ -164,10 +166,11 @@ Configuration is environment-driven (the same variables in an MCP client's `env`
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `ODATANO_ACCESS_URL` | `https://api.odatano.dev` | The ODATANO ACCESS gateway, or a direct NIGHTGATE host app (`http://localhost:4004` for `cds watch`) |
+| `ODATANO_ACCESS_URL` | `https://api.preprod.odatano.dev` | The ODATANO ACCESS gateway, or a direct NIGHTGATE host app (`http://localhost:4004` for `cds watch`) |
 | `ODATANO_ACCESS_USER` / `ODATANO_ACCESS_PASSWORD` | unset | Basic auth against a direct instance (CAP dev/mocked auth); not for agents |
-| `ODATANO_ACCESS_KEY` | unset | **The credential: an ODATANO ACCESS key `oda_…`** (sent as `Authorization: Bearer`; buy one at `POST https://api.odatano.dev/keys`, redeem a code, or sign in at the console). The same variable configures `@odatano/core-mcp`. Against a direct NIGHTGATE instance a raw `ngat_...` agent grant (sent as `x-agent-token`, combinable with basic auth) or any other bearer goes here too |
+| `ODATANO_ACCESS_KEY` | unset | **The credential: an ODATANO ACCESS key `oda_…`** (sent as `Authorization: Bearer`; buy one at `POST https://api.preprod.odatano.dev/keys`, redeem a code, or sign in at the console). The same variable configures `@odatano/core-mcp`. Against a direct NIGHTGATE instance a raw `ngat_...` agent grant (sent as `x-agent-token`, combinable with basic auth) or any other bearer goes here too |
 | `NIGHTGATE_SERVICE_PATH` | `/api/v1/nightgate` | OData service path |
+| `ODATANO_ANALYTICS_URL` | `<ODATANO_ACCESS_URL>/odata/v4/astra` | Absolute URL of ODATANO ASTRA (analytics). Nothing to set through the gateway; for an own deployment the URL of your ASTRA instance, which is its own app on its own port. The `analytics_*` tools register when it answers |
 | `NIGHTGATE_TIMEOUT_MS` | `30000` | Per-request timeout |
 | `NIGHTGATE_SEED_HEX` | unset | Caller seed (64 or 128 hex) for `build_sponsorable_transaction`; never a tool argument. Needs `@odatano/nightgate-tx` installed |
 | `NIGHTGATE_NETWORK` | `preprod` | Network the local builder targets (`preview`, `preprod`, `mainnet`) |
@@ -200,6 +203,22 @@ Configuration is environment-driven (the same variables in an MCP client's `env`
 | `sponsor_unbound_transaction` | Same trust shape for an UNBOUND (`bind: false`) caller transaction: the sponsor merges a dust spend from a locked backing, binds and submits, several per sponsor wallet in parallel; `sponsorSessionId` may be the platform pool id (async job) |
 | `derive_token_type` | Derive the raw token type a minting contract produces, from contract address + domain separator (synchronous) |
 | `get_job_status` | Poll an async NIGHTGATE job until succeeded/failed |
+
+### Analytics (ODATANO ASTRA, registered when the host serves it)
+
+Aggregates over the Midnight index, one unit per read, same key. Every tool pins the chain; the
+Cardano server (`@odatano/core-mcp`) carries the same tools for its chain.
+
+| Tool | What it does |
+|---|---|
+| `analytics_overview` | Network, tip, both lags, blocks and transactions of the last hour with change, fees of the last 24 h in DUST (total, median, p95), average block time |
+| `analytics_key_figures` | Every chain-wide metric over one window (`1h`, `24h`, `7d`, `14d`, `30d`): value, previous window, change in % |
+| `analytics_daily` | One row per UTC day: `blocks`, `transactions` (shielded, with proof, contract calls/deploys, failed, ...) or `fees` (paid, estimated, estimate error), newest first |
+| `analytics_top_block_producers` | Block authors by blocks produced over a window |
+| `analytics_metrics` | The metric catalogue: ids, kinds, units, descriptions |
+| `analytics_metric` / `analytics_series` | One metric over a window (value, previous, change, percentiles) / as a time series in the window's resolution |
+| `analytics_compare` | The same metric for Midnight and Cardano side by side |
+| `analytics_anomalies` | Days far from their own baseline, in standard deviations, with every number the verdict rests on |
 
 All verification tools return `verified: false` as a clean negative rather
 than an error when the attestation or proof is absent. Write tools require

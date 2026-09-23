@@ -11,7 +11,7 @@
  *
  * `@odatano/nightgate-tx` is a devDependency here, so `npm install` is enough.
  *
- *   ODATANO_ACCESS_URL=https://api.odatano.dev ODATANO_ACCESS_KEY=oda_... \
+ *   ODATANO_ACCESS_URL=https://api.preprod.odatano.dev ODATANO_ACCESS_KEY=oda_... \
  *   NIGHTGATE_SEED_HEX=<64 or 128 hex, a throwaway is fine> \
  *   NIGHTGATE_VAULT=<vault address> NIGHTGATE_SPONSOR_SESSION_ID=<sponsor or pool id> \
  *   npm run live:sponsor-unbound

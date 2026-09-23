@@ -48,10 +48,36 @@ export function int64(value: string | number): Int64Literal {
   return { $int64: digits };
 }
 
+/** OData system query options for the ASTRA entity reads. */
+export interface EntityQuery {
+  filter?: string;
+  select?: string;
+  orderby?: string;
+  top?: number;
+  skip?: number;
+  count?: boolean;
+}
+
+/** Build the `?$filter=...` query string; only provided options are emitted. */
+export function buildQueryString(query: EntityQuery): string {
+  const parts: string[] = [];
+  const add = (name: string, value: string | number | boolean | undefined) => {
+    if (value === undefined || value === '') return;
+    parts.push(`$${name}=${encodeURIComponent(String(value))}`);
+  };
+  add('filter', query.filter);
+  add('select', query.select);
+  add('orderby', query.orderby);
+  add('top', query.top);
+  add('skip', query.skip);
+  if (query.count) add('count', 'true');
+  return parts.length ? `?${parts.join('&')}` : '';
+}
+
 /**
- * Minimal OData V4 client for the Nightgate service. Two verbs only:
- * unbound functions (GET, parameters inline in the URL) and unbound
- * actions (POST, JSON body), which is all the MCP tools need.
+ * Minimal OData V4 client for the Nightgate service: unbound functions (GET,
+ * parameters inline in the URL) and unbound actions (POST, JSON body), plus
+ * the reads of ODATANO ASTRA, the analytics service next door on the same host.
  */
 export class NightgateClient {
   constructor(private readonly config: NightgateMcpConfig) {}
@@ -78,7 +104,48 @@ export class NightgateClient {
     return this.request('POST', url, body);
   }
 
-  private async request(method: 'GET' | 'POST', url: string, body?: unknown): Promise<unknown> {
+  // ---- ODATANO ASTRA: analytics over the same index, same host, same key ----
+
+  /** Base URL of ODATANO ASTRA: the gateway's `/odata/v4/astra` unless ODATANO_ANALYTICS_URL says otherwise. */
+  analyticsUrl(): string {
+    return this.config.analyticsUrl;
+  }
+
+  /** GET <astra>/<Entity>?$filter=... â the ready-made views (KeyFigures, BlocksDaily, TopBlockProducers, ...). */
+  async analyticsQuery(entity: string, query: EntityQuery = {}): Promise<unknown> {
+    return this.request('GET', `${this.analyticsUrl()}/${entity}${buildQueryString(query)}`);
+  }
+
+  /** GET <astra>/<name>(p1=...,p2=...) â getWindow, getSeries, compare, getAnomalies. */
+  async analyticsFunction(name: string, params: Record<string, string | number | undefined>): Promise<unknown> {
+    const parts: string[] = [];
+    for (const [key, value] of Object.entries(params)) {
+      if (value === undefined || value === null || value === '') continue;
+      parts.push(`${key}=${odataLiteral(value)}`);
+    }
+    return this.request('GET', `${this.analyticsUrl()}/${name}(${parts.join(',')})`);
+  }
+
+  /**
+   * Does the host serve ODATANO ASTRA? `served` registers the analytics tools,
+   * `closed` = the gateway answers 403, `absent` = 404 or no answer. Never throws.
+   */
+  async analyticsStatus(): Promise<'served' | 'closed' | 'absent'> {
+    try {
+      const response = await fetch(`${this.analyticsUrl()}/$metadata`, {
+        method: 'GET',
+        headers: this.authHeaders(),
+        signal: AbortSignal.timeout(Math.min(this.config.timeoutMs, 10000)),
+      });
+      await response.arrayBuffer().catch(() => undefined);
+      if (response.ok) return 'served';
+      return response.status === 403 ? 'closed' : 'absent';
+    } catch {
+      return 'absent';
+    }
+  }
+
+  private authHeaders(): Record<string, string> {
     const headers: Record<string, string> = { Accept: 'application/json' };
     if (this.config.token?.startsWith('ngat_')) {
       // NIGHTGATE agent-grant token (0.14.0): travels in its own header so it
@@ -95,6 +162,11 @@ export class NightgateClient {
       const basic = Buffer.from(`${this.config.username}:${this.config.password ?? ''}`).toString('base64');
       headers.Authorization = `Basic ${basic}`;
     }
+    return headers;
+  }
+
+  private async request(method: 'GET' | 'POST', url: string, body?: unknown): Promise<unknown> {
+    const headers = this.authHeaders();
     if (body !== undefined) headers['Content-Type'] = 'application/json';
 
     const response = await fetch(url, {
