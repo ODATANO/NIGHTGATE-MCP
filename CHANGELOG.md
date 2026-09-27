@@ -3,10 +3,17 @@
 All notable changes to `@odatano/nightgate-mcp` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
-The server compatibility table in the README says which NIGHTGATE each
-version needs.
+The README says which NIGHTGATE the current version needs.
 
 ## [Unreleased]
+
+## [0.8.1] - 2026-09-27
+
+### Changed
+
+- `get_job_status` describes `chainSegments` (NIGHTGATE 0.28.0): for a confirmed batch,
+  which calls applied. Tool errors carry the server's string `code` (`INVALID_ARGUMENT`, ...).
+- README reorganized; compatibility names the current version only.
 
 ## [0.8.0] - 2026-09-23
 

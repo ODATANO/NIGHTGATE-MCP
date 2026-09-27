@@ -1052,7 +1052,9 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         'Sponsor jobs: failed + errorCode CHAIN_EXECUTION_FAILED = the transaction IS on-chain but ' +
         'the contract call did not apply (same-contract conflict) -> rebuild and sponsor again; ' +
         'reconciliation_required = broadcast outcome unknown to the server yet, the transaction ' +
-        'identifier is in the error message, the server keeps resolving it via the indexer.',
+        'identifier is in the error message, the server keeps resolving it via the indexer. ' +
+        'Batches: once confirmed, chainSegments ([{ segment, calls, applied }]) says which calls ' +
+        'applied; resend only the ones with applied false.',
       inputSchema: {
         jobId: z.string().uuid().describe('Job id returned by a submit action'),
         sessionId: z.string().uuid()
