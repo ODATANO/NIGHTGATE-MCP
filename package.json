@@ -1,6 +1,6 @@
 {
   "name": "@odatano/nightgate-mcp",
-  "version": "0.8.1",
+  "version": "0.9.0",
   "description": "MCP server exposing NIGHTGATE (Midnight blockchain attestation layer) to AI agents",
   "license": "Apache-2.0",
   "publishConfig": {
@@ -23,7 +23,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
-    "integration": "npm run build && node --env-file-if-exists=.env scripts/integration-mcp.mjs",
+    "integration": "npm run build && node --env-file-if-exists=.env scripts/integration-mcp.mjs && node scripts/integration-swap.mjs",
     "live:sponsor-unbound": "npm run build && node --env-file-if-exists=.env scripts/live-sponsor-unbound.mjs",
     "prepublishOnly": "npm run build",
     "live:stdio": "npm run build && node --env-file-if-exists=.env scripts/live-stdio-smoke.mjs",
@@ -49,7 +49,7 @@
     "zod": "^3.23.0"
   },
   "peerDependencies": {
-    "@odatano/nightgate-tx": ">=0.6.0"
+    "@odatano/nightgate-tx": ">=0.8.0"
   },
   "peerDependenciesMeta": {
     "@odatano/nightgate-tx": {
@@ -57,7 +57,7 @@
     }
   },
   "devDependencies": {
-    "@odatano/nightgate-tx": "^0.6.0",
+    "@odatano/nightgate-tx": "^0.8.0",
     "@types/node": "^20.0.0",
     "typescript": "^5.5.0"
   }

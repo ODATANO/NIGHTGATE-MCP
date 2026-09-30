@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { int64, NightgateApiError, NightgateClient } from './client.js';
 import type { NightgateMcpConfig } from './config.js';
 import { BUILDABLE_CALLS, BUILDABLE_ARTIFACTS, buildSponsorable, attesterIdentity } from './builder.js';
+import { buildOffer, readOffer, revertHalf, settleHalfJob, swapWalletInfo, takenHalves, takeOffer, trackHalfJob } from './swap.js';
 
 const HEX64 = /^[0-9a-fA-F]{64}$/;
 const hex64 = (what: string) =>
@@ -27,6 +28,22 @@ const setDirs = z.array(z.boolean()).length(6)
 const POLL_HINT = 'Async: returns { jobId, status } immediately; poll get_job_status until succeeded or failed.';
 /** NIGHTGATE's platform sponsor pool id (0.17.2+): the server picks a free pool sponsor. */
 const PLATFORM_POOL_SENTINEL = '00000000-0000-0000-0000-706f6f6c0000';
+
+/** One side of a swap: a raw token type and an amount in atoms. */
+const swapLeg = (what: string) => z.object({
+  tokenType: hex64(`${what}.tokenType`).describe('Raw token type (64 hex), what derive_token_type returns'),
+  amount: z.union([
+    z.string().regex(/^[1-9]\d*$/, `${what}.amount must be a positive integer (decimal string)`),
+    z.number().int().positive(),
+  ]).describe('Amount in atoms; a decimal string is exact'),
+});
+const legOut = (leg: { tokenType: string; amount: string | number }) => ({ tokenType: leg.tokenType.toLowerCase(), amount: String(leg.amount) });
+/** A swap half as it is handed over: offer file text or base64 of the serialized transaction. */
+const swapHalf = (what: string) => z.string().min(16)
+  .describe(`${what}: offer file text (swapoffer1...) or base64 of the serialized, proven transaction`);
+const SWAP_HINT = 'A swap settles two shielded tokens between two wallets without a contract: each side builds one half ' +
+  '(it spends the coin it gives and creates the coin it wants), the two mirrored halves merge into one transaction, ' +
+  'and a sponsor pays the fee.';
 
 /**
  * Per-slot salt of a proof field. Content-tree leaves are SALTED, so every
@@ -942,8 +959,10 @@ export function registerTools(server: McpServer, client: NightgateClient, config
     {
       description:
         'The attester id this MCP server builds under (derived from NIGHTGATE_SEED_HEX via the ' +
-        'txbuilder), plus the network. Use it to check verify_attestation results against the ' +
-        'identity that will appear on-chain; builds nothing and submits nothing.',
+        'txbuilder), plus the network, the shielded address and the two public shielded keys ' +
+        '(what a sender needs to create a coin for this wallet). Use it to check ' +
+        'verify_attestation results against the identity that will appear on-chain; builds ' +
+        'nothing and submits nothing.',
       inputSchema: {},
     },
     run(async () => {
@@ -1020,6 +1039,174 @@ export function registerTools(server: McpServer, client: NightgateClient, config
   );
 
   server.registerTool(
+    'get_swap_wallet',
+    {
+      description:
+        'The shielded wallet this MCP server swaps from (seed from NIGHTGATE_SEED_HEX): address, ' +
+        'public keys, and per token type the balance, the number of free coins and `spendable`, ' +
+        'the most ONE swap half can give (what its largest coins hold, up to maxInputs coins). ' +
+        'Also lists the halves built here that are not handed over yet. The wallet syncs its ' +
+        'shielded coins only; a first sync from genesis takes about 5 minutes, during which the ' +
+        'answer is { synced: false, syncingSeconds }: call again. Spends nothing.',
+      inputSchema: {},
+    },
+    run(async () => {
+      if (!config) throw new Error('swaps are not configured for this server instance');
+      return swapWalletInfo(config);
+    }),
+  );
+
+  server.registerTool(
+    'read_swap_offer',
+    {
+      description:
+        SWAP_HINT + ' This reads what an offer gives and wants FROM THE TRANSACTION it carries, ' +
+        'never from what its maker says: gives / wants (token type and amount, from the ' +
+        "maker's side), the coins it carries, and whether it is bound. Refuses anything that is " +
+        'not a plain swap half (a contract call, unshielded value, more than one token type ' +
+        'given or wanted). Needs no wallet and no network. Check the terms here before take_swap_offer.',
+      inputSchema: {
+        offer: swapHalf('The offer'),
+      },
+    },
+    run(async (args) => readOffer(args.offer)),
+  );
+
+  server.registerTool(
+    'build_swap_offer',
+    {
+      description:
+        SWAP_HINT + ' This builds and proves ONE half from this server\'s wallet: it spends `give` ' +
+        'and creates `want` (and the change) for this wallet. Returns the offer file ' +
+        '(`offer`, text starting with swapoffer1, about 25 000 characters) to publish, its `id`, ' +
+        'and the terms read back from the built transaction. Anyone holding the wanted token can ' +
+        'take the offer; the first swap that lands consumes it. The coins stay reserved until ' +
+        'the swap lands: withdraw an offer that is not going to be used with revert_swap_offer. ' +
+        'An offer refers to a recent chain state and expires with it, so publish it promptly. ' +
+        '`give.amount` may not exceed `spendable` of get_swap_wallet. Proving takes about 200 s ' +
+        'in-process, 11 to 17 s on a proof server (NIGHTGATE_PROOF_SERVER_URL). Spends no fee.',
+      inputSchema: {
+        give: swapLeg('give'),
+        want: swapLeg('want'),
+        bind: z.boolean().optional()
+          .describe('true (default): bound, with its offer file. false: unbound, base64 only (halfB64), for a taker that builds unbound too'),
+      },
+    },
+    run(async (args) => {
+      if (!config) throw new Error('swaps are not configured for this server instance');
+      return buildOffer(config, { give: legOut(args.give), want: legOut(args.want), bind: args.bind });
+    }),
+  );
+
+  server.registerTool(
+    'take_swap_offer',
+    {
+      description:
+        SWAP_HINT + ' This takes an offer: it reads the offer\'s terms from the transaction, ' +
+        'refuses when they differ from `expect`, builds and proves the mirror half from this ' +
+        'server\'s wallet (it spends what the offer wants and creates what the offer gives). ' +
+        'With sponsorSessionId the two halves go to the sponsor at once and the answer is the ' +
+        'job ({ jobId, status, sessionId, id, terms }): poll get_job_status with the returned ' +
+        'sessionId. Without it the answer carries both halves for sponsor_swap. ALWAYS pass ' +
+        '`expect` with the terms you agreed to: an offer is text from someone else. A sponsor ' +
+        'that refuses the swap leaves the proven half held under `halfId`: send it again with ' +
+        'sponsor_swap({ halfId, sponsorSessionId }) or release its coins with revert_swap_offer. ' +
+        'If the offer was taken by somebody else first, the job fails: revert_swap_offer.',
+      inputSchema: {
+        offer: swapHalf('The offer to take'),
+        expect: z.object({ gives: swapLeg('expect.gives'), wants: swapLeg('expect.wants') }).optional()
+          .describe("The terms you agreed to, from the MAKER's side: what the offer gives and what it wants"),
+        sponsorSessionId: z.string().uuid().optional()
+          .describe('Sponsor session or the platform sponsor POOL id ' + `${PLATFORM_POOL_SENTINEL}` + '; when given the swap is submitted at once'),
+        idempotencyKey: z.string().optional().describe('Dedupes retries of the same submission'),
+      },
+    },
+    run(async (args) => {
+      if (!config) throw new Error('swaps are not configured for this server instance');
+      const taken = await takeOffer(config, {
+        offer: args.offer,
+        ...(args.expect ? { expect: { gives: legOut(args.expect.gives), wants: legOut(args.expect.wants) } } : {}),
+      });
+      if (!args.sponsorSessionId) return taken;
+      let job: Record<string, unknown>;
+      try {
+        job = await client.callAction('sponsorSwap', {
+          makerHalfB64: taken.makerHalfB64,
+          takerHalfB64: taken.takerHalfB64,
+          sponsorSessionId: args.sponsorSessionId,
+          idempotencyKey: args.idempotencyKey,
+        }) as Record<string, unknown>;
+      } catch (err) {
+        if (!(err instanceof NightgateApiError)) throw err;
+        throw new NightgateApiError(err.status, err.code, err.message, { ...(err.detail ?? {}), halfId: taken.id });
+      }
+      trackHalfJob(taken.id, job.jobId);
+      return { ...job, id: taken.id, terms: taken.terms, bound: taken.bound, buildMs: taken.buildMs };
+    }),
+  );
+
+  server.registerTool(
+    'revert_swap_offer',
+    {
+      description:
+        'Release the coins of a swap half this server built (build_swap_offer or take_swap_offer) ' +
+        'that is not going to be used. Until then, or until the swap lands, the coins count as ' +
+        'spent in this wallet. It does not recall an offer somebody already holds: to make a ' +
+        'published offer worthless, spend its coins in another swap. Ids are listed by ' +
+        'get_swap_wallet; a half whose swap landed leaves the list when get_job_status reports it.',
+      inputSchema: {
+        id: z.string().regex(/^[0-9a-f]{32}$/, 'id must be the 32 hex characters a swap tool returned'),
+      },
+    },
+    run(async (args) => {
+      if (!config) throw new Error('swaps are not configured for this server instance');
+      return revertHalf(config, args.id);
+    }),
+  );
+
+  server.registerTool(
+    'sponsor_swap',
+    {
+      description:
+        SWAP_HINT + ' This hands the two halves to the sponsor, which checks them, merges them, ' +
+        'pays the dust and submits: each half carries an offer and nothing else, gives exactly ' +
+        'one token type and wants exactly one other, both on the sponsor\'s token allow-list and ' +
+        'never NIGHT, at most 4 inputs and 2 outputs per half, and the halves mirror each other ' +
+        'in types and amounts. A half may be bound or unbound and is passed as offer file text ' +
+        'or base64. Off on a server by default (NIGHTGATE_SPONSOR_ALLOW_SWAPS); an agent grant ' +
+        'needs sponsorSwap in its allowedActions. Job result { txHash, swap: { gives, wants } }. ' +
+        'An offer fills once: if it was taken first by somebody else the job fails. Pass both ' +
+        'halves, or `halfId` alone for an offer this server took (take_swap_offer keeps both ' +
+        'halves). Poll get_job_status with the sessionId RETURNED by this call. ' + POLL_HINT,
+      inputSchema: {
+        makerHalf: swapHalf("The maker's half (the offer)").optional(),
+        takerHalf: swapHalf("The taker's half").optional(),
+        sponsorSessionId: z.string().uuid()
+          .describe('Wallet session that pays the dust and submits, or the platform sponsor POOL id ' +
+            `${PLATFORM_POOL_SENTINEL}`),
+        idempotencyKey: z.string().optional()
+          .describe('Dedupes retries of the SAME two halves'),
+        halfId: z.string().regex(/^[0-9a-f]{32}$/, 'halfId must be the 32 hex characters a swap tool returned').optional()
+          .describe('Id of the half this server built for the swap: alone it names a taken offer, next to both halves it ties the job to the half'),
+      },
+    },
+    run(async (args) => {
+      if (!!args.makerHalf !== !!args.takerHalf) throw new Error('sponsor_swap needs makerHalf AND takerHalf, or halfId alone');
+      if (!args.makerHalf && !args.halfId) throw new Error('sponsor_swap needs makerHalf and takerHalf, or the halfId of an offer this server took');
+      const halves = args.makerHalf && args.takerHalf
+        ? { makerHalfB64: args.makerHalf, takerHalfB64: args.takerHalf }
+        : takenHalves(args.halfId as string);
+      const job = await client.callAction('sponsorSwap', {
+        ...halves,
+        sponsorSessionId: args.sponsorSessionId,
+        idempotencyKey: args.idempotencyKey,
+      }) as Record<string, unknown>;
+      if (args.halfId) trackHalfJob(args.halfId, job?.jobId);
+      return job;
+    }),
+  );
+
+  server.registerTool(
     'derive_token_type',
     {
       description:
@@ -1054,18 +1241,22 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         'reconciliation_required = broadcast outcome unknown to the server yet, the transaction ' +
         'identifier is in the error message, the server keeps resolving it via the indexer. ' +
         'Batches: once confirmed, chainSegments ([{ segment, calls, applied }]) says which calls ' +
-        'applied; resend only the ones with applied false.',
+        'applied; resend only the ones with applied false. Swaps: the result carries swap ' +
+        '{ gives, wants }, what was exchanged from the maker\'s side.',
       inputSchema: {
         jobId: z.string().uuid().describe('Job id returned by a submit action'),
         sessionId: z.string().uuid()
           .describe('Wallet session id the job belongs to; for sponsor jobs the sessionId RETURNED by the sponsor call'),
       },
     },
-    run(async (args) =>
-      client.callAction('getJobStatus', {
+    run(async (args) => {
+      const job = await client.callAction('getJobStatus', {
         jobId: args.jobId,
         sessionId: args.sessionId,
-      })),
+      }) as Record<string, unknown> | undefined;
+      settleHalfJob(args.jobId, job?.status);
+      return job;
+    }),
   );
 }
 

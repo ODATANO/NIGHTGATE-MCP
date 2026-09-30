@@ -50,10 +50,13 @@ The hosted gateway is the default (Midnight preprod). The same key works for
 | `prove_field_predicates_batch` | Up to 8 claims in one transaction (async) |
 | `prove_document_integrity`, `prove_document_diff` | ZK claims across two documents (async) |
 | `grant_disclosure`, `revoke_disclosure` | On-chain disclosure ACL (async) |
-| `build_sponsorable_transaction`, `get_attester_identity` | Build, prove and sign locally; the attester id it builds under |
+| `build_sponsorable_transaction`, `get_attester_identity` | Build, prove and sign locally; the attester id and shielded keys it builds under |
 | `sponsor_unbound_transaction`, `sponsor_finalized_transaction` | Hand locally built bytes to a sponsor that pays and submits (async) |
+| `get_swap_wallet`, `read_swap_offer` | Shielded coins of the local wallet; what an offer gives and wants |
+| `build_swap_offer`, `take_swap_offer`, `revert_swap_offer` | Build one half of a shielded swap locally, take an offer, release a half |
+| `sponsor_swap` | Hand both halves of a swap to a sponsor that merges, pays and submits (async) |
 | `derive_token_type` | Token type a minting contract produces |
-| `get_job_status` | Poll an async job; batches report `chainSegments` |
+| `get_job_status` | Poll an async job; batches report `chainSegments`, swaps `swap` |
 | `analytics_*` | Midnight aggregates via ODATANO ASTRA, when the host serves it |
 
 Errors carry the server's HTTP status and `code` (`INVALID_ARGUMENT`, ...).
@@ -69,6 +72,31 @@ Errors carry the server's HTTP status and `code` (`INVALID_ARGUMENT`, ...).
 `failed` / `CHAIN_EXECUTION_FAILED`: landed but not applied; build again, never
 resubmit the same bytes.
 
+## Shielded swaps
+
+Two wallets exchange two shielded tokens without a contract. Each side builds
+one half, the halves mirror each other, a sponsor merges them and pays the fee.
+Needs `@odatano/nightgate-tx` >= 0.8.0 next to the server and `NIGHTGATE_SEED_HEX`.
+
+1. `get_swap_wallet`: balance, free coins and `spendable` per token type. The
+   first call starts the sync of the shielded coins (about 5 minutes from
+   genesis, seconds with `NIGHTGATE_SWAP_STATE_FILE`).
+2. Maker: `build_swap_offer` with `give` and `want` returns the offer file
+   (`swapoffer1...`) to publish.
+3. Taker: `read_swap_offer`, then `take_swap_offer` with `expect` and a
+   `sponsorSessionId`. It builds the mirror half and submits both.
+4. `get_job_status` with the returned `sessionId`; the result carries `swap`.
+
+- One half spends at most `NIGHTGATE_SWAP_MAX_INPUTS` coins, the smallest that
+  fit. `give.amount` above `spendable` is refused before proving.
+- An offer fills once. Its coins stay reserved in the maker's wallet until the
+  swap lands or `revert_swap_offer` releases them.
+- A refused submission keeps the proven half: `sponsor_swap` with its `halfId`.
+- The sponsor needs swaps switched on and both token types on its list; an
+  agent grant needs `sponsorSwap` in `allowedActions`.
+- With `NIGHTGATE_PROOF_SERVER_URL` the proof server sees the coins a half
+  spends: use one you run yourself.
+
 ## Configuration
 
 | Variable | Default | Purpose |
@@ -76,9 +104,11 @@ resubmit the same bytes.
 | `ODATANO_ACCESS_KEY` | unset | `oda_…` key, or an `ngat_…` agent grant on a direct instance |
 | `ODATANO_ACCESS_URL` | `https://api.preprod.odatano.dev` | Gateway or a direct NIGHTGATE host |
 | `ODATANO_ACCESS_USER` / `_PASSWORD` | unset | Basic auth of a direct instance |
-| `NIGHTGATE_SEED_HEX` | unset | Seed for local building; never a tool argument |
+| `NIGHTGATE_SEED_HEX` | unset | Seed (128 hex) for local building and swaps; never a tool argument |
 | `NIGHTGATE_NETWORK` | `preprod` | Network of the local builder |
 | `NIGHTGATE_PROOF_SERVER_URL` | unset | Prove on a proof server instead of in-process |
+| `NIGHTGATE_SWAP_STATE_FILE` | unset | File for the swap wallet's state; it holds the wallet's coins, keep it like a key |
+| `NIGHTGATE_SWAP_MAX_INPUTS` | `4` | Most coins one swap half spends; the sponsor's limit applies |
 | `NIGHTGATE_TIMEOUT_MS` | `30000` | Per-request timeout |
 
 Also: `NIGHTGATE_SERVICE_PATH`, `ODATANO_ANALYTICS_URL`, `NIGHTGATE_INDEXER_HTTP_URL`,
@@ -98,7 +128,12 @@ Then `ODATANO_ACCESS_URL=http://localhost:4004`, `ODATANO_ACCESS_USER=nightgate`
 
 ## Compatibility
 
-NIGHTGATE >= 0.24.0; `chainSegments` needs >= 0.28.0. Per version: [CHANGELOG](CHANGELOG.md).
+NIGHTGATE >= 0.24.0; `chainSegments` needs >= 0.28.0, swaps need >= 0.29.0.
+`@odatano/nightgate-tx` >= 0.8.0 for local building. Per version: [CHANGELOG](CHANGELOG.md).
+
+Local building needs ONE `@midnight-ntwrk/ledger-v8` in the install
+(`npm ls @midnight-ntwrk/ledger-v8`). `expected instance of ...` means two:
+`npm dedupe`.
 
 ## Development
 

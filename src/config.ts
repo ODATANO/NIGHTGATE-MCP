@@ -31,7 +31,7 @@ export interface NightgateMcpConfig {
   timeoutMs: number;
 
   // ---- local building (build_sponsorable_transaction), all optional ----
-  /** Caller seed (64 or 128 hex) for the local txbuilder; never a tool argument. */
+  /** Caller seed (128 hex, a 64-byte BIP39 seed) for local building and swaps; never a tool argument. */
   seedHex?: string;
   /** Midnight network the builder targets; default preprod. */
   network: string;
@@ -44,6 +44,12 @@ export interface NightgateMcpConfig {
   zkCacheDir?: string;
   /** Set to prove contract circuits on a proof server instead of in-process wasm. */
   proofServerUrl?: string;
+
+  // ---- shielded swaps, all optional ----
+  /** File the swap wallet's state is kept in, so a restart resumes instead of syncing from genesis. It holds the wallet's coins. */
+  swapStateFile?: string;
+  /** Most coins one swap half spends; default the builder's (4, the sponsor's default). */
+  swapMaxInputs?: number;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): NightgateMcpConfig {
@@ -57,8 +63,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): NightgateMcpCo
     throw new Error(`Invalid NIGHTGATE_NETWORK: ${network} (preview | preprod | mainnet)`);
   }
   const seedHex = env.NIGHTGATE_SEED_HEX || undefined;
-  if (seedHex && !/^([0-9a-fA-F]{64}|[0-9a-fA-F]{128})$/.test(seedHex)) {
-    throw new Error('Invalid NIGHTGATE_SEED_HEX: expected 64 or 128 hex characters');
+  if (seedHex && !/^[0-9a-fA-F]{128}$/.test(seedHex)) {
+    throw new Error('Invalid NIGHTGATE_SEED_HEX: expected 128 hex characters (a 64-byte BIP39 seed)');
+  }
+  const swapMaxInputs = env.NIGHTGATE_SWAP_MAX_INPUTS ? Number(env.NIGHTGATE_SWAP_MAX_INPUTS) : undefined;
+  if (swapMaxInputs !== undefined && (!Number.isInteger(swapMaxInputs) || swapMaxInputs < 1)) {
+    throw new Error(`Invalid NIGHTGATE_SWAP_MAX_INPUTS: ${env.NIGHTGATE_SWAP_MAX_INPUTS} (a positive integer)`);
   }
   const analyticsUrl = (env.ODATANO_ANALYTICS_URL || `${baseUrl}/odata/v4/astra`).replace(/\/+$/, '');
   return {
@@ -77,5 +87,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): NightgateMcpCo
     zkConfigBaseUrl: env.NIGHTGATE_ZK_CONFIG_BASE_URL || undefined,
     zkCacheDir: env.NIGHTGATE_ZK_CACHE_DIR || undefined,
     proofServerUrl: env.NIGHTGATE_PROOF_SERVER_URL || undefined,
+    swapStateFile: env.NIGHTGATE_SWAP_STATE_FILE || undefined,
+    swapMaxInputs,
   };
 }

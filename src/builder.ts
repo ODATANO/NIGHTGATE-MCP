@@ -107,7 +107,7 @@ async function loadModules(ref: BuildableArtifact = DEFAULT_ARTIFACT): Promise<T
       } catch (err) {
         modules.delete(ref);
         throw new Error(
-          `local building of '${ref}' needs @odatano/nightgate-tx >= 0.6.0 next to the MCP server ` +
+          `local building of '${ref}' needs @odatano/nightgate-tx >= 0.8.0 next to the MCP server ` +
           '(npm install @odatano/nightgate-tx): ' + (err instanceof Error ? err.message : String(err)),
         );
       }
@@ -133,7 +133,7 @@ function defaults(network: string) {
  */
 async function getBuilder(config: NightgateMcpConfig, ref: BuildableArtifact = DEFAULT_ARTIFACT): Promise<any> {
   if (!config.seedHex) {
-    throw new Error('local building needs NIGHTGATE_SEED_HEX (64 or 128 hex) in the MCP server environment; it is never a tool argument');
+    throw new Error('local building needs NIGHTGATE_SEED_HEX (128 hex) in the MCP server environment; it is never a tool argument');
   }
   let entry = builders.get(ref);
   if (!entry) {
@@ -280,9 +280,17 @@ export async function buildSponsorable(config: NightgateMcpConfig, input: BuildI
 }
 
 /** The caller's attester id (derived from the seed), without building anything. */
-export async function attesterIdentity(config: NightgateMcpConfig): Promise<{ attesterId: string; network: string }> {
+export async function attesterIdentity(config: NightgateMcpConfig): Promise<{
+  attesterId: string; network: string; shieldedAddress?: string; coinPublicKey?: string; encryptionPublicKey?: string;
+}> {
   const b = await getBuilder(config);
-  return { attesterId: String(b.attesterId), network: config.network };
+  return {
+    attesterId: String(b.attesterId),
+    network: config.network,
+    // from @odatano/nightgate-tx 0.8.0 on
+    ...(b.addresses?.shielded ? { shieldedAddress: String(b.addresses.shielded) } : {}),
+    ...(b.shieldedKeys ? { coinPublicKey: String(b.shieldedKeys.coinPublicKey), encryptionPublicKey: String(b.shieldedKeys.encryptionPublicKey) } : {}),
+  };
 }
 
 /** Test seam / shutdown: release every lineage's builder connections. */

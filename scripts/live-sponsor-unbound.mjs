@@ -12,7 +12,7 @@
  * `@odatano/nightgate-tx` is a devDependency here, so `npm install` is enough.
  *
  *   ODATANO_ACCESS_URL=https://api.preprod.odatano.dev ODATANO_ACCESS_KEY=oda_... \
- *   NIGHTGATE_SEED_HEX=<64 or 128 hex, a throwaway is fine> \
+ *   NIGHTGATE_SEED_HEX=<128 hex, a throwaway is fine> \
  *   NIGHTGATE_VAULT=<vault address> NIGHTGATE_SPONSOR_SESSION_ID=<sponsor or pool id> \
  *   npm run live:sponsor-unbound
  */
@@ -77,7 +77,7 @@ for (;;) {
 }
 console.log(`job ${job.status} after ${((Date.now() - t1) / 1000).toFixed(1)}s`, job.errorCode ? `(${job.errorCode})` : '', (job.result || '').slice(0, 160));
 
-const v = await call('verify_attestation', { contractAddress: VAULT, payloadHash, compiledArtifactRef: ARTIFACT });
+const v = await call('verify_attestation', { contractAddress: VAULT, attesterId: me.attesterId, payloadHash, compiledArtifactRef: ARTIFACT });
 console.log('verify_attestation:', JSON.stringify(v));
 await client.close();
 await closeBuilder();

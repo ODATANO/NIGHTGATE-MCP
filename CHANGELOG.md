@@ -7,6 +7,33 @@ The README says which NIGHTGATE the current version needs.
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-09-30
+
+### Added
+
+- **Shielded swap tools** (NIGHTGATE 0.29.0, `@odatano/nightgate-tx` 0.8.0):
+  - `get_swap_wallet`: address, public keys, per token type balance, free coins and
+    `spendable`; halves built here that have not landed.
+  - `read_swap_offer`: `gives`, `wants`, `inputs`, `outputs`, `bound` of an offer file or
+    base64 half, read from the transaction.
+  - `build_swap_offer(give, want, bind?)`: one proven half, as offer file (`swapoffer1...`).
+  - `take_swap_offer(offer, expect?, sponsorSessionId?, idempotencyKey?)`: the mirror half;
+    with a sponsor session it submits both halves. A refusal carries `halfId`.
+  - `sponsor_swap(makerHalf, takerHalf | halfId, sponsorSessionId, idempotencyKey?)`.
+  - `revert_swap_offer(id)`: releases the coins of a half built here.
+- `NIGHTGATE_SWAP_STATE_FILE`, `NIGHTGATE_SWAP_MAX_INPUTS`.
+- `get_attester_identity` returns `shieldedAddress`, `coinPublicKey`, `encryptionPublicKey`.
+- `npm run integration` covers the swap tools (`scripts/integration-swap.mjs`).
+
+### Changed
+
+- Peer dependency `@odatano/nightgate-tx` `>=0.8.0` (was `>=0.6.0`).
+- Lockfile: one `@midnight-ntwrk/ledger-v8` (8.1.0) in the tree. Two copies made the local
+  builder fail with `expected instance of DustParameters`.
+- `live:sponsor-unbound` verifies with the attester id.
+- `NIGHTGATE_SEED_HEX` is 128 hex (a 64-byte BIP39 seed); 64 hex is refused at startup.
+- `get_job_status` describes the `swap` result of a swap job.
+
 ## [0.8.1] - 2026-09-27
 
 ### Changed

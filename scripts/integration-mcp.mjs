@@ -35,6 +35,12 @@ const EXPECTED_TOOLS = [
   'sponsor_finalized_transaction',
   'sponsor_unbound_transaction',
   'derive_token_type',
+  'get_swap_wallet',
+  'read_swap_offer',
+  'build_swap_offer',
+  'take_swap_offer',
+  'revert_swap_offer',
+  'sponsor_swap',
   'get_job_status',
 ];
 
@@ -214,6 +220,34 @@ console.log('OK: width-32 schema/opening accepted, mask bit 31 evaluated');
 const legitimate32 = await integrityCall(32, [0, 31], 0x80000000);
 if (saysVacuous(legitimate32)) fail('a legitimate width-32 mask was rejected as vacuous');
 console.log('OK: a mask leaving one real slot constrained passes validation');
+
+// Swaps: the argument rules hold before a wallet is opened or a request is sent.
+const swapCall = (name, args) => client.callTool({ name, arguments: args })
+  .catch((err) => ({ isError: true, content: [{ type: 'text', text: String(err) }] }));
+const said = (r, re) => r.isError && re.test(JSON.stringify(r.content ?? r));
+const POOL = '00000000-0000-0000-0000-706f6f6c0000';
+const legA = { tokenType: 'a'.repeat(64), amount: '1000' };
+const legB = { tokenType: 'b'.repeat(64), amount: '300' };
+
+const zeroAmount = await swapCall('build_swap_offer', { give: { ...legA, amount: '0' }, want: legB });
+if (!said(zeroAmount, /positive integer/)) fail(`build_swap_offer accepted an amount of 0: ${JSON.stringify(zeroAmount).slice(0, 200)}`);
+const shortType = await swapCall('build_swap_offer', { give: { tokenType: 'abc', amount: '1' }, want: legB });
+if (!shortType.isError) fail('build_swap_offer accepted a token type that is not 64 hex');
+console.log('OK: swap legs need a 64-hex token type and a positive amount');
+
+const oneHalf = await swapCall('sponsor_swap', { makerHalf: 'A'.repeat(64), sponsorSessionId: POOL });
+if (!said(oneHalf, /makerHalf AND takerHalf, or halfId alone/)) fail(`sponsor_swap accepted one half: ${JSON.stringify(oneHalf).slice(0, 200)}`);
+const noHalf = await swapCall('sponsor_swap', { sponsorSessionId: POOL });
+if (!said(noHalf, /makerHalf and takerHalf, or the halfId/)) fail(`sponsor_swap accepted a call without halves: ${JSON.stringify(noHalf).slice(0, 200)}`);
+const unknownHalf = await swapCall('sponsor_swap', { halfId: '0'.repeat(32), sponsorSessionId: POOL });
+if (!said(unknownHalf, /no half with id 0{32} is held/)) fail(`sponsor_swap accepted an id it does not hold: ${JSON.stringify(unknownHalf).slice(0, 200)}`);
+const unknownRevert = await swapCall('revert_swap_offer', { id: '0'.repeat(32) });
+if (!said(unknownRevert, /no half with id 0{32}/)) fail(`revert_swap_offer accepted an id it does not hold: ${JSON.stringify(unknownRevert).slice(0, 200)}`);
+console.log('OK: sponsor_swap takes both halves or a held half id, revert_swap_offer a held id');
+
+const notAnOffer = await swapCall('read_swap_offer', { offer: 'swapoffer1' + 'q'.repeat(40) });
+if (!notAnOffer.isError) fail('read_swap_offer accepted text that is no offer');
+console.log(`OK: read_swap_offer refuses text that is no offer (${JSON.stringify(notAnOffer.content?.[0]?.text ?? '').slice(0, 110)})`);
 
 await client.close();
 await server.close();
