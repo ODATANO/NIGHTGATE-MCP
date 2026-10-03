@@ -12,6 +12,7 @@
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { NightgateMcpConfig } from './config.js';
+import { txExport } from './tx-module.js';
 
 /**
  * Call kinds this tool can prepare; one per attestation-vault helper.
@@ -277,6 +278,37 @@ export async function buildSponsorable(config: NightgateMcpConfig, input: BuildI
   if (input.bind) out.finalizedTxB64 = built.finalizedTxB64;
   else out.unboundTxB64 = built.unboundTxB64;
   return out;
+}
+
+const identities = new Map<string, Promise<SeedIdentity>>();
+
+export interface SeedIdentity {
+  attesterId: string;
+  shieldedAddress: string;
+  coinPublicKey: string;
+  encryptionPublicKey: string;
+}
+
+/** The public identity of the seed, a pure derivation: no builder, no indexer, no zk assets. */
+export async function seedIdentity(config: NightgateMcpConfig): Promise<SeedIdentity> {
+  if (!config.seedHex) throw new Error('NIGHTGATE_SEED_HEX (128 hex) is not set in the MCP server environment');
+  const key = `${config.network}:${config.seedHex.toLowerCase()}`;
+  let entry = identities.get(key);
+  if (!entry) {
+    entry = (async () => {
+      const deriveIdentity = await txExport<(opts: { seedHex: string; networkId: string }) => Promise<any>>('deriveIdentity', 'identity derivation', '0.8.0');
+      const id = await deriveIdentity({ seedHex: config.seedHex as string, networkId: config.network });
+      return {
+        attesterId: String(id.attesterId),
+        shieldedAddress: String(id.addresses?.shielded ?? ''),
+        coinPublicKey: String(id.shieldedKeys?.coinPublicKey ?? ''),
+        encryptionPublicKey: String(id.shieldedKeys?.encryptionPublicKey ?? ''),
+      };
+    })();
+    entry.catch(() => identities.delete(key));
+    identities.set(key, entry);
+  }
+  return entry;
 }
 
 /** The caller's attester id (derived from the seed), without building anything. */

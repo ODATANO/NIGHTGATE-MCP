@@ -48,6 +48,18 @@ export function int64(value: string | number): Int64Literal {
   return { $int64: digits };
 }
 
+/** Marker for a URL literal rendered as given: a Guid, which OData writes unquoted. */
+export interface RawLiteral {
+  $raw: string;
+}
+
+export function raw(value: string): RawLiteral {
+  if (!/^[A-Za-z0-9:.+-]+$/.test(value)) throw new Error(`not a bare OData literal: ${value}`);
+  return { $raw: value };
+}
+
+type FunctionParam = string | number | boolean | Int64Literal | RawLiteral | null | undefined;
+
 /** OData system query options for the ASTRA entity reads. */
 export interface EntityQuery {
   filter?: string;
@@ -83,14 +95,13 @@ export class NightgateClient {
   constructor(private readonly config: NightgateMcpConfig) {}
 
   /** GET <service>/<name>(p1=...,p2=...) with only the provided parameters. */
-  async callFunction(name: string, params: Record<string, string | number | Int64Literal | undefined>): Promise<unknown> {
-    const parts: string[] = [];
-    for (const [key, value] of Object.entries(params)) {
-      if (value === undefined || value === null || value === '') continue;
-      parts.push(`${key}=${odataLiteral(value)}`);
-    }
-    const url = `${this.config.baseUrl}${this.config.servicePath}/${name}(${parts.join(',')})`;
-    return this.request('GET', url);
+  async callFunction(name: string, params: Record<string, FunctionParam>): Promise<unknown> {
+    return this.request('GET', `${this.config.baseUrl}${this.config.servicePath}/${functionCall(name, params)}`);
+  }
+
+  /** GET <indexer service>/<name>(...): the read-only status functions, anonymous on the server. */
+  async callIndexerFunction(name: string, params: Record<string, FunctionParam> = {}): Promise<unknown> {
+    return this.request('GET', `${this.config.baseUrl}${this.config.indexerServicePath}/${functionCall(name, params)}`);
   }
 
   /** POST <service>/<name> with the provided parameters as JSON body. */
@@ -117,13 +128,8 @@ export class NightgateClient {
   }
 
   /** GET <astra>/<name>(p1=...,p2=...) â getWindow, getSeries, compare, getAnomalies. */
-  async analyticsFunction(name: string, params: Record<string, string | number | undefined>): Promise<unknown> {
-    const parts: string[] = [];
-    for (const [key, value] of Object.entries(params)) {
-      if (value === undefined || value === null || value === '') continue;
-      parts.push(`${key}=${odataLiteral(value)}`);
-    }
-    return this.request('GET', `${this.analyticsUrl()}/${name}(${parts.join(',')})`);
+  async analyticsFunction(name: string, params: Record<string, FunctionParam>): Promise<unknown> {
+    return this.request('GET', `${this.analyticsUrl()}/${functionCall(name, params)}`);
   }
 
   /**
@@ -191,10 +197,20 @@ export class NightgateClient {
   }
 }
 
+/** `name(p1=...,p2=...)`; an explicit null is a parameter the function declares and the caller leaves unused. */
+function functionCall(name: string, params: Record<string, FunctionParam>): string {
+  const parts: string[] = [];
+  for (const [key, value] of Object.entries(params)) {
+    if (value === undefined || value === '') continue;
+    parts.push(`${key}=${value === null ? 'null' : odataLiteral(value)}`);
+  }
+  return `${name}(${parts.join(',')})`;
+}
+
 /** Encode a JS value as an OData URL literal (strings quoted, '' -> escaped). */
-function odataLiteral(value: string | number | Int64Literal): string {
-  if (typeof value === 'number') return String(value);
-  if (typeof value === 'object') return value.$int64;
+function odataLiteral(value: string | number | boolean | Int64Literal | RawLiteral): string {
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  if (typeof value === 'object') return '$raw' in value ? value.$raw : value.$int64;
   return `'${value.replace(/'/g, "''")}'`;
 }
 

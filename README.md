@@ -54,7 +54,11 @@ The hosted gateway is the default (Midnight preprod). The same key works for
 | `sponsor_unbound_transaction`, `sponsor_finalized_transaction` | Hand locally built bytes to a sponsor that pays and submits (async) |
 | `get_swap_wallet`, `read_swap_offer` | Shielded coins of the local wallet; what an offer gives and wants |
 | `build_swap_offer`, `take_swap_offer`, `revert_swap_offer` | Build one half of a shielded swap locally, take an offer, release a half |
-| `sponsor_swap` | Hand both halves of a swap to a sponsor that merges, pays and submits (async) |
+| `sponsor_swap` | Hand both halves of a swap, or a board offer plus the taker half, to a sponsor that merges, pays and submits (async) |
+| `post_swap_offer`, `list_swap_offers`, `retire_swap_offer` | The server's offer board: post a maker half, find open offers, take yours down |
+| `get_swap_offer`, `my_swap_offers`, `get_board_status` | Follow one offer, see your own posts and their fills, read the board's counts without credentials |
+| `mint_token` | Mint a shielded token with a name of your own on a token factory: built here with the seed as issuer and sponsored, or by a server session (async) |
+| `grant_disclosure_to_holders`, `revoke_holder_disclosure`, `claim_disclosure`, `holder_claim_key` | Disclose a document to the holders of a token; read it with the secret behind a registered claim key |
 | `derive_token_type` | Token type a minting contract produces |
 | `get_job_status` | Poll an async job; batches report `chainSegments`, swaps `swap` |
 | `analytics_*` | Midnight aggregates via ODATANO ASTRA, when the host serves it |
@@ -82,10 +86,15 @@ Needs `@odatano/nightgate-tx` >= 0.8.0 next to the server and `NIGHTGATE_SEED_HE
    first call starts the sync of the shielded coins (about 5 minutes from
    genesis, seconds with `NIGHTGATE_SWAP_STATE_FILE`).
 2. Maker: `build_swap_offer` with `give` and `want` returns the offer file
-   (`swapoffer1...`) to publish.
-3. Taker: `read_swap_offer`, then `take_swap_offer` with `expect` and a
-   `sponsorSessionId`. It builds the mirror half and submits both.
+   (`swapoffer1...`) to publish, or `post_swap_offer` puts it on the server's
+   board.
+3. Taker: `list_swap_offers` or `read_swap_offer`, then `take_swap_offer` with
+   `expect`, a `sponsorSessionId` and, for a board entry, its `offerId`. It
+   builds the mirror half and submits both.
 4. `get_job_status` with the returned `sessionId`; the result carries `swap`.
+   The maker follows the offer with `get_swap_offer` or `my_swap_offers`
+   (`filled` + `filledTxHash`); `list_swap_offers` with `status: all` and
+   `since` is the board's change feed.
 
 - One half spends at most `NIGHTGATE_SWAP_MAX_INPUTS` coins, the smallest that
   fit. `give.amount` above `spendable` is refused before proving.
@@ -96,6 +105,13 @@ Needs `@odatano/nightgate-tx` >= 0.8.0 next to the server and `NIGHTGATE_SEED_HE
   agent grant needs `sponsorSwap` in `allowedActions`.
 - With `NIGHTGATE_PROOF_SERVER_URL` the proof server sees the coins a half
   spends: use one you run yourself.
+- Tokens to swap: `mint_token` mints on a token factory to this wallet (or
+  any other wallet, given both of its keys). Without a `sessionId` the seed is
+  the issuer: the mint is built and proven here (needs
+  `@odatano/contract-token-factory` next to `@odatano/nightgate-tx`; the
+  prover keys come from the package's release assets on first use) and the
+  sponsor pays. A landed mint makes the type known to the sponsor.
+- `get_board_status` says whether a sponsor is ready before anything is built.
 
 ## Configuration
 
@@ -111,7 +127,7 @@ Needs `@odatano/nightgate-tx` >= 0.8.0 next to the server and `NIGHTGATE_SEED_HE
 | `NIGHTGATE_SWAP_MAX_INPUTS` | `4` | Most coins one swap half spends; the sponsor's limit applies |
 | `NIGHTGATE_TIMEOUT_MS` | `30000` | Per-request timeout |
 
-Also: `NIGHTGATE_SERVICE_PATH`, `ODATANO_ANALYTICS_URL`, `NIGHTGATE_INDEXER_HTTP_URL`,
+Also: `NIGHTGATE_SERVICE_PATH`, `NIGHTGATE_INDEXER_SERVICE_PATH`, `ODATANO_ANALYTICS_URL`, `NIGHTGATE_INDEXER_HTTP_URL`,
 `NIGHTGATE_INDEXER_WS_URL`, `NIGHTGATE_NODE_URL`, `NIGHTGATE_ZK_CONFIG_BASE_URL`,
 `NIGHTGATE_ZK_CACHE_DIR`.
 
@@ -128,8 +144,8 @@ Then `ODATANO_ACCESS_URL=http://localhost:4004`, `ODATANO_ACCESS_USER=nightgate`
 
 ## Compatibility
 
-NIGHTGATE >= 0.24.0; `chainSegments` needs >= 0.28.0, swaps need >= 0.29.0.
-`@odatano/nightgate-tx` >= 0.8.0 for local building. Per version: [CHANGELOG](CHANGELOG.md).
+NIGHTGATE >= 0.24.0; `chainSegments` needs >= 0.28.0, swaps need >= 0.29.0, the offer board and holder disclosure need >= 0.30.0, `get_swap_offer`, `my_swap_offers`, `get_board_status`, the server way of `mint_token` and the `status`/`since` filters need >= 0.30.1.
+`@odatano/nightgate-tx` >= 0.10.2 for local building (local minting also needs `@odatano/contract-token-factory`). Per version: [CHANGELOG](CHANGELOG.md).
 
 Local building needs ONE `@midnight-ntwrk/ledger-v8` in the install
 (`npm ls @midnight-ntwrk/ledger-v8`). `expected instance of ...` means two:

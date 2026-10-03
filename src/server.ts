@@ -15,7 +15,7 @@ export interface Capabilities {
  * host (schema inspection, tests) get a deterministic tool set.
  */
 export function buildServer(config: NightgateMcpConfig, caps: Capabilities = { analytics: false }): McpServer {
-  const server = new McpServer({ name: 'nightgate', version: '0.9.0' });
+  const server = new McpServer({ name: 'nightgate', version: '0.10.0' });
   const client = new NightgateClient(config);
   registerTools(server, client, config);
   if (caps.analytics) registerAnalyticsTools(server, client);

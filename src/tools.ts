@@ -1,19 +1,21 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import { int64, NightgateApiError, NightgateClient } from './client.js';
+import { int64, raw, NightgateApiError, NightgateClient } from './client.js';
 import type { NightgateMcpConfig } from './config.js';
-import { BUILDABLE_CALLS, BUILDABLE_ARTIFACTS, buildSponsorable, attesterIdentity } from './builder.js';
-import { buildOffer, readOffer, revertHalf, settleHalfJob, swapWalletInfo, takenHalves, takeOffer, trackHalfJob } from './swap.js';
+import { BUILDABLE_CALLS, BUILDABLE_ARTIFACTS, buildSponsorable, attesterIdentity, seedIdentity } from './builder.js';
+import { buildOffer, readOffer, revertHalf, sameOffer, settleHalfJob, swapWalletInfo, takenHalves, takeOffer, trackHalfJob } from './swap.js';
+import { txExport } from './tx-module.js';
+import { buildMint } from './factory.js';
 
 const HEX64 = /^[0-9a-fA-F]{64}$/;
 const hex64 = (what: string) =>
   z.string().regex(HEX64, `${what} must be 64 hex characters`);
 
-/** Scaled non-negative integer, as string (preferred, exact) or JS number. */
+/** Scaled non-negative integer, as string (preferred, exact) or JS number; a number stays below 2^53 so String() renders it exactly. */
 const scaledInt = (what: string) =>
   z.union([
     z.string().regex(/^\d+$/, `${what} must be a non-negative integer (decimal string)`),
-    z.number().int().nonnegative(),
+    z.number().int().nonnegative().safe(),
   ]);
 
 const merkleSiblings = z.array(hex64('sibling')).length(4)
@@ -34,7 +36,7 @@ const swapLeg = (what: string) => z.object({
   tokenType: hex64(`${what}.tokenType`).describe('Raw token type (64 hex), what derive_token_type returns'),
   amount: z.union([
     z.string().regex(/^[1-9]\d*$/, `${what}.amount must be a positive integer (decimal string)`),
-    z.number().int().positive(),
+    z.number().int().positive().safe(),
   ]).describe('Amount in atoms; a decimal string is exact'),
 });
 const legOut = (leg: { tokenType: string; amount: string | number }) => ({ tokenType: leg.tokenType.toLowerCase(), amount: String(leg.amount) });
@@ -44,6 +46,11 @@ const swapHalf = (what: string) => z.string().min(16)
 const SWAP_HINT = 'A swap settles two shielded tokens between two wallets without a contract: each side builds one half ' +
   '(it spends the coin it gives and creates the coin it wants), the two mirrored halves merge into one transaction, ' +
   'and a sponsor pays the fee.';
+
+const OFFER_STATUS = z.enum(['open', 'filled', 'retired', 'expired', 'all']);
+const BOARD_ROW_HINT = 'Each row: offerId, the offer half (feed it to read_swap_offer or take_swap_offer), gives/wants ' +
+  'type and amount, tags, expiresAt, postedAt, status, filledTxHash, closedAt, changedAt. Never the poster or the ' +
+  "half's nullifiers.";
 
 /**
  * Per-slot salt of a proof field. Content-tree leaves are SALTED, so every
@@ -1108,10 +1115,12 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         'With sponsorSessionId the two halves go to the sponsor at once and the answer is the ' +
         'job ({ jobId, status, sessionId, id, terms }): poll get_job_status with the returned ' +
         'sessionId. Without it the answer carries both halves for sponsor_swap. ALWAYS pass ' +
-        '`expect` with the terms you agreed to: an offer is text from someone else. A sponsor ' +
-        'that refuses the swap leaves the proven half held under `halfId`: send it again with ' +
-        'sponsor_swap({ halfId, sponsorSessionId }) or release its coins with revert_swap_offer. ' +
-        'If the offer was taken by somebody else first, the job fails: revert_swap_offer.',
+        '`expect` with the terms you agreed to: an offer is text from someone else. With offerId ' +
+        'the board entry is read first and the call refuses, before proving, when it is not open ' +
+        'or carries another offer than `offer`. A sponsor that refuses the swap leaves the proven ' +
+        'half held under `halfId`: send it again with sponsor_swap({ halfId, offerId?, ' +
+        'sponsorSessionId }) or release its coins with revert_swap_offer. If the offer was taken ' +
+        'by somebody else first, the job fails: revert_swap_offer.',
       inputSchema: {
         offer: swapHalf('The offer to take'),
         expect: z.object({ gives: swapLeg('expect.gives'), wants: swapLeg('expect.wants') }).optional()
@@ -1119,10 +1128,19 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         sponsorSessionId: z.string().uuid().optional()
           .describe('Sponsor session or the platform sponsor POOL id ' + `${PLATFORM_POOL_SENTINEL}` + '; when given the swap is submitted at once'),
         idempotencyKey: z.string().optional().describe('Dedupes retries of the same submission'),
+        offerId: z.string().uuid().optional()
+          .describe('The board entry the offer came from (list_swap_offers), so the fill is recorded against it'),
       },
     },
     run(async (args) => {
       if (!config) throw new Error('swaps are not configured for this server instance');
+      if (args.offerId) {
+        const row = await client.callFunction('getSwapOffer', { offerId: raw(args.offerId) }) as { offer?: unknown; status?: unknown };
+        if (row.status !== 'open') throw new Error(`board offer ${args.offerId} is ${String(row.status)}, not open`);
+        if (typeof row.offer !== 'string' || !(await sameOffer(args.offer, row.offer))) {
+          throw new Error(`board offer ${args.offerId} carries another offer than the one passed: take the board's text, or drop offerId`);
+        }
+      }
       const taken = await takeOffer(config, {
         offer: args.offer,
         ...(args.expect ? { expect: { gives: legOut(args.expect.gives), wants: legOut(args.expect.wants) } } : {}),
@@ -1131,7 +1149,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
       let job: Record<string, unknown>;
       try {
         job = await client.callAction('sponsorSwap', {
-          makerHalfB64: taken.makerHalfB64,
+          ...(args.offerId ? { offerId: args.offerId } : { makerHalfB64: taken.makerHalfB64 }),
           takerHalfB64: taken.takerHalfB64,
           sponsorSessionId: args.sponsorSessionId,
           idempotencyKey: args.idempotencyKey,
@@ -1177,7 +1195,8 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         'needs sponsorSwap in its allowedActions. Job result { txHash, swap: { gives, wants } }. ' +
         'An offer fills once: if it was taken first by somebody else the job fails. Pass both ' +
         'halves, or `halfId` alone for an offer this server took (take_swap_offer keeps both ' +
-        'halves). Poll get_job_status with the sessionId RETURNED by this call. ' + POLL_HINT,
+        'halves); with `offerId` the maker half comes from the board, next to takerHalf or the ' +
+        'halfId of the taken offer. Poll get_job_status with the sessionId RETURNED by this call. ' + POLL_HINT,
       inputSchema: {
         makerHalf: swapHalf("The maker's half (the offer)").optional(),
         takerHalf: swapHalf("The taker's half").optional(),
@@ -1188,14 +1207,24 @@ export function registerTools(server: McpServer, client: NightgateClient, config
           .describe('Dedupes retries of the SAME two halves'),
         halfId: z.string().regex(/^[0-9a-f]{32}$/, 'halfId must be the 32 hex characters a swap tool returned').optional()
           .describe('Id of the half this server built for the swap: alone it names a taken offer, next to both halves it ties the job to the half'),
+        offerId: z.string().uuid().optional()
+          .describe('An offer on the server\'s board (list_swap_offers): the server takes the maker half from there; pass takerHalf or the halfId of the taken offer with it'),
       },
     },
     run(async (args) => {
-      if (!!args.makerHalf !== !!args.takerHalf) throw new Error('sponsor_swap needs makerHalf AND takerHalf, or halfId alone');
-      if (!args.makerHalf && !args.halfId) throw new Error('sponsor_swap needs makerHalf and takerHalf, or the halfId of an offer this server took');
-      const halves = args.makerHalf && args.takerHalf
-        ? { makerHalfB64: args.makerHalf, takerHalfB64: args.takerHalf }
-        : takenHalves(args.halfId as string);
+      let halves: Record<string, string>;
+      if (args.offerId) {
+        if (args.makerHalf) throw new Error('sponsor_swap with offerId takes the maker half from the board: no makerHalf');
+        const takerHalf = args.takerHalf ?? (args.halfId ? takenHalves(args.halfId).takerHalfB64 : undefined);
+        if (!takerHalf) throw new Error('sponsor_swap with offerId needs takerHalf, or the halfId of an offer this server took');
+        halves = { offerId: args.offerId, takerHalfB64: takerHalf };
+      } else {
+        if (!!args.makerHalf !== !!args.takerHalf) throw new Error('sponsor_swap needs makerHalf AND takerHalf, or halfId alone');
+        if (!args.makerHalf && !args.halfId) throw new Error('sponsor_swap needs makerHalf and takerHalf, or the halfId of an offer this server took');
+        halves = args.makerHalf && args.takerHalf
+          ? { makerHalfB64: args.makerHalf, takerHalfB64: args.takerHalf }
+          : takenHalves(args.halfId as string);
+      }
       const job = await client.callAction('sponsorSwap', {
         ...halves,
         sponsorSessionId: args.sponsorSessionId,
@@ -1203,6 +1232,193 @@ export function registerTools(server: McpServer, client: NightgateClient, config
       }) as Record<string, unknown>;
       if (args.halfId) trackHalfJob(args.halfId, job?.jobId);
       return job;
+    }),
+  );
+
+  server.registerTool(
+    'post_swap_offer',
+    {
+      description:
+        'Post a maker half on the server\'s offer board, so takers find it with list_swap_offers ' +
+        'instead of receiving the offer file out of band. The server checks it like a half it ' +
+        'would sponsor (one token type given, one wanted, both on its list, never NIGHT) and ' +
+        'records its terms; the half itself stays signed by the maker. The offer closes when a ' +
+        'swap that spends one of its inputs lands, on expiry, or by retire_swap_offer. Needs ' +
+        'postSwapOffer in an agent grant\'s allowedActions. Returns { offerId, status, terms }.',
+      inputSchema: {
+        offer: swapHalf('The maker half, as offer file text or base64'),
+        expiresAt: z.string().datetime().optional().describe('ISO timestamp; at most 90 days ahead'),
+        tags: z.array(z.string().min(1).max(40)).max(8).optional().describe('Up to 8 tags for list_swap_offers'),
+      },
+    },
+    run(async (args) =>
+      client.callAction('postSwapOffer', {
+        offer: args.offer,
+        expiresAt: args.expiresAt,
+        tags: args.tags ? JSON.stringify(args.tags) : undefined,
+      })),
+  );
+
+  server.registerTool(
+    'list_swap_offers',
+    {
+      description:
+        'Offers on the server\'s board. Without status: the open ones, newest first. status filled | ' +
+        'retired | expired | all reads the closed ones instead, ordered by last change; since keeps ' +
+        'offers changed after that instant, so status all + since polled repeatedly is the board\'s ' +
+        'change feed. Filters are exact 64-hex token types and one tag. ' + BOARD_ROW_HINT +
+        ' Every token may read the board.',
+      inputSchema: {
+        givesType: hex64('givesType').optional().describe('Only offers that give this token type'),
+        wantsType: hex64('wantsType').optional().describe('Only offers that want this token type'),
+        tag: z.string().min(1).max(40).optional().describe('Only offers carrying this tag'),
+        limit: z.number().int().min(1).max(200).optional().describe('Default 50'),
+        status: OFFER_STATUS.optional().describe('Default open'),
+        since: z.string().datetime().optional().describe('ISO timestamp; only offers changed after it'),
+      },
+    },
+    run(async (args) => listOffers(client, { ...args, mine: null })),
+  );
+
+  server.registerTool(
+    'my_swap_offers',
+    {
+      description:
+        'The offers this caller posted on the board (a token: its grant\'s), open and closed, ' +
+        'ordered by last change: what is still open, what filled (filledTxHash), what expired or ' +
+        'was retired. status narrows to one state, since to offers changed after an instant. ' +
+        BOARD_ROW_HINT,
+      inputSchema: {
+        status: OFFER_STATUS.optional().describe('Default all'),
+        since: z.string().datetime().optional().describe('ISO timestamp; only offers changed after it'),
+        limit: z.number().int().min(1).max(200).optional().describe('Default 50'),
+      },
+    },
+    run(async (args) => listOffers(client, { status: args.status ?? 'all', since: args.since, limit: args.limit, mine: true })),
+  );
+
+  server.registerTool(
+    'get_swap_offer',
+    {
+      description:
+        'One board offer by id, open or closed, in the board\'s shape: status, filledTxHash once a ' +
+        'swap spent it, closedAt, changedAt. The way to follow an offer after post_swap_offer or ' +
+        'after taking one. Unknown id: 404. ' + BOARD_ROW_HINT,
+      inputSchema: {
+        offerId: z.string().uuid().describe('The board entry'),
+      },
+    },
+    run(async (args) => client.callFunction('getSwapOffer', { offerId: raw(args.offerId) })),
+  );
+
+  server.registerTool(
+    'get_board_status',
+    {
+      description:
+        'Counts of the server\'s offer board and its sponsors, no credentials needed: openOffers, ' +
+        'offersFilledToday and swapsToday (UTC day), sponsorsConfigured and sponsorsReady (at tip ' +
+        'with a spendable dust note; 0 means a sponsor_swap would wait or fail now), asOf. ' +
+        'Computed at most every 10 s.',
+      inputSchema: {},
+    },
+    run(async () => client.callIndexerFunction('getBoardStatus')),
+  );
+
+  server.registerTool(
+    'retire_swap_offer',
+    {
+      description:
+        'Take an offer off the board. Only its poster may; the coins behind the half stay ' +
+        'reserved until revert_swap_offer releases the half built here. Returns { offerId, status }.',
+      inputSchema: {
+        offerId: z.string().uuid().describe('The board entry'),
+      },
+    },
+    run(async (args) => client.callAction('retireSwapOffer', { offerId: args.offerId })),
+  );
+
+  server.registerTool(
+    'grant_disclosure_to_holders',
+    {
+      description:
+        'Disclose a document to everyone who holds a token: whoever registered a claim key on ' +
+        'the holder-registry contract for tokenType by passing a coin through it can read the ' +
+        'text with claim_disclosure, and the server never learns who. content must hash to ' +
+        'payloadHash (blake2b-256 or sha256 of the UTF-8 text); it is stored encrypted. A repeat ' +
+        'call for the same payload, token type and registry updates the grant (content kept ' +
+        'when omitted). Returns { holderGrantId, hasContent, expiresAt, status }.',
+      inputSchema: {
+        payloadHash: hex64('payloadHash').describe('Hash of the document (64 hex)'),
+        tokenType: hex64('tokenType').describe('The raw shielded token type whose holders may read (64 hex)'),
+        registryAddress: hex64('registryAddress').describe('The holder-registry deployment holders registered on'),
+        content: z.string().max(1_048_576).optional().describe('The document text; must hash to payloadHash'),
+        contentType: z.string().max(100).optional().describe("Default 'text/plain'"),
+        expiresAt: z.string().datetime().optional().describe('ISO timestamp, at most one year ahead'),
+      },
+    },
+    run(async (args) =>
+      client.callAction('grantDisclosureToHolders', {
+        payloadHash: args.payloadHash.toLowerCase(),
+        tokenType: args.tokenType.toLowerCase(),
+        registryAddress: args.registryAddress.toLowerCase(),
+        content: args.content,
+        contentType: args.contentType,
+        expiresAt: args.expiresAt,
+      })),
+  );
+
+  server.registerTool(
+    'revoke_holder_disclosure',
+    {
+      description: 'Revoke a disclosure to token holders. Only its grantor may. Returns { holderGrantId, status }.',
+      inputSchema: {
+        holderGrantId: z.string().uuid().describe('From grant_disclosure_to_holders'),
+      },
+    },
+    run(async (args) => client.callAction('revokeHolderDisclosure', { holderGrantId: args.holderGrantId })),
+  );
+
+  server.registerTool(
+    'claim_disclosure',
+    {
+      description:
+        'Read a document disclosed to the holders of a token. claimSecret is the 32-byte secret ' +
+        'behind the claim key registered on the holder-registry contract (holder_claim_key); the ' +
+        'server reads the registry live and answers { entitled, content, contentType, ' +
+        'contentHashKind, expiresAt } or { entitled: false, reason }. Needs a live indexer on ' +
+        'the server.',
+      inputSchema: {
+        payloadHash: hex64('payloadHash').describe('Hash of the document (64 hex)'),
+        tokenType: hex64('tokenType').describe('The raw shielded token type (64 hex)'),
+        claimSecret: hex64('claimSecret').describe('The secret behind the registered claim key (64 hex)'),
+      },
+    },
+    run(async (args) =>
+      client.callAction('claimDisclosure', {
+        payloadHash: args.payloadHash.toLowerCase(),
+        tokenType: args.tokenType.toLowerCase(),
+        claimSecret: args.claimSecret.toLowerCase(),
+      })),
+  );
+
+  server.registerTool(
+    'holder_claim_key',
+    {
+      description:
+        'The claim key a token holder registers on the holder-registry contract, derived from a ' +
+        '32-byte secret (compute-only). Without a secret a fresh random one is generated: keep ' +
+        'it, claim_disclosure needs it. Register the key with registerHolder(coin, claimKey) on ' +
+        'the registry (one coin of the token type passes through the contract and comes back), ' +
+        'e.g. through build_sponsorable_transaction on a builder that knows the registry.',
+      inputSchema: {
+        claimSecret: hex64('claimSecret').optional().describe('Existing secret (64 hex); omit to generate one'),
+      },
+    },
+    run(async (args) => {
+      const holderClaimKey = await txExport<(secretHex: string) => string>('holderClaimKey', 'holder_claim_key', '0.10.0');
+      const { randomBytes } = await import('node:crypto');
+      const claimSecret = (args.claimSecret ?? randomBytes(32).toString('hex')).toLowerCase();
+      return { claimSecret, claimKey: holderClaimKey(claimSecret) };
     }),
   );
 
@@ -1229,6 +1445,76 @@ export function registerTools(server: McpServer, client: NightgateClient, config
   );
 
   server.registerTool(
+    'mint_token',
+    {
+      description:
+        'Mint a shielded token with a name of your own on a token-factory deployment. Two ways. ' +
+        'LOCAL (default, no sessionId): this process is the issuer, its issuer secret derives from ' +
+        'NIGHTGATE_SEED_HEX, the mint is built, proven and signed here and the fee-unpaid ' +
+        'transaction goes to the sponsor (sponsorSessionId, default the platform pool) like ' +
+        'sponsor_unbound_transaction; the seed never leaves this process. The factory has to be ' +
+        'on the sponsor\'s contract list and mint on its circuit list. SERVER (sessionId given): the ' +
+        'server session is the issuer and mints through mintFactoryToken; needs that action in ' +
+        'the grant. Either way the same name from another issuer is another token, and the ' +
+        'response names the token before the job runs ({ tokenType, domain, issuerKey }); a ' +
+        'landed mint makes the type known to the sponsor (swaps, offer board). The recipient ' +
+        'defaults to this wallet (get_attester_identity); another wallet takes both of its keys. ' +
+        'Job result { txHash, ... }. Poll get_job_status with the sessionId RETURNED by this call. ' + POLL_HINT,
+      inputSchema: {
+        contractAddress: hex64('contractAddress').describe('A token-factory deployment'),
+        name: z.string().min(1).refine((s) => Buffer.byteLength(s, 'utf8') <= 32, 'name must be at most 32 UTF-8 bytes')
+          .describe('Token name, at most 32 UTF-8 bytes; with the issuer it names the token type'),
+        amount: z.union([
+          z.string().regex(/^[1-9]\d*$/, 'amount must be a positive integer (decimal string)'),
+          z.number().int().positive().safe(),
+        ]).describe('Atoms to mint; a decimal string is exact'),
+        recipientCoinPublicKey: hex64('recipientCoinPublicKey').optional()
+          .describe('Zswap coin public key of the receiving wallet (64 hex); default this wallet\'s own'),
+        recipientEncryptionPublicKey: hex64('recipientEncryptionPublicKey').optional()
+          .describe('The receiving wallet\'s encryption public key (64 hex); required with a recipient other than this wallet, local way'),
+        sponsorSessionId: z.string().uuid().optional()
+          .describe(`Local way: the session that pays the dust and submits; default the platform sponsor POOL id ${PLATFORM_POOL_SENTINEL}. Server way: an optional second session that pays`),
+        sessionId: z.string().uuid().optional()
+          .describe('Server way only: the wallet session that mints; it is the issuer'),
+        idempotencyKey: z.string().optional().describe('Dedupes retries'),
+      },
+    },
+    run(async (args) => {
+      if (args.sessionId) {
+        let recipient = args.recipientCoinPublicKey;
+        if (!recipient) {
+          if (!config?.seedHex) throw new Error('mint_token needs recipientCoinPublicKey: no NIGHTGATE_SEED_HEX for a default');
+          recipient = (await seedIdentity(config)).coinPublicKey;
+          if (!recipient) throw new Error('mint_token needs recipientCoinPublicKey: the seed exposes no shielded keys');
+        }
+        return client.callAction('mintFactoryToken', {
+          contractAddress: args.contractAddress.toLowerCase(),
+          name: args.name,
+          amount: String(args.amount),
+          recipientCoinPublicKey: recipient.toLowerCase(),
+          sessionId: args.sessionId,
+          idempotencyKey: args.idempotencyKey,
+          sponsorSessionId: args.sponsorSessionId,
+        });
+      }
+      if (!config) throw new Error('local minting is not configured for this server instance');
+      const built = await buildMint(config, {
+        contractAddress: args.contractAddress,
+        name: args.name,
+        amount: String(args.amount),
+        recipientCoinPublicKey: args.recipientCoinPublicKey,
+        recipientEncryptionPublicKey: args.recipientEncryptionPublicKey,
+      });
+      const job = await client.callAction('sponsorUnboundTransaction', {
+        unboundTxB64: built.unboundTxB64,
+        sponsorSessionId: args.sponsorSessionId ?? PLATFORM_POOL_SENTINEL,
+        idempotencyKey: args.idempotencyKey,
+      }) as Record<string, unknown>;
+      const { unboundTxB64: _tx, ...rest } = built;
+      return { ...job, ...rest, channel: 'local' };
+    }),
+  );
+  server.registerTool(
     'get_job_status',
     {
       description:
@@ -1242,7 +1528,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         'identifier is in the error message, the server keeps resolving it via the indexer. ' +
         'Batches: once confirmed, chainSegments ([{ segment, calls, applied }]) says which calls ' +
         'applied; resend only the ones with applied false. Swaps: the result carries swap ' +
-        '{ gives, wants }, what was exchanged from the maker\'s side.',
+        '{ gives, wants }, what was exchanged from the maker\'s side. Mints: tokenType.',
       inputSchema: {
         jobId: z.string().uuid().describe('Job id returned by a submit action'),
         sessionId: z.string().uuid()
@@ -1264,6 +1550,21 @@ type ToolResult = {
   content: Array<{ type: 'text'; text: string }>;
   isError?: boolean;
 };
+
+/** listSwapOffers wants all seven parameters, null for the unused ones. */
+function listOffers(client: NightgateClient, args: {
+  givesType?: string; wantsType?: string; tag?: string; limit?: number; status?: string; since?: string; mine: boolean | null;
+}): Promise<unknown> {
+  return client.callFunction('listSwapOffers', {
+    givesType: args.givesType?.toLowerCase() ?? null,
+    wantsType: args.wantsType?.toLowerCase() ?? null,
+    tag: args.tag ?? null,
+    limit: args.limit ?? null,
+    status: args.status ?? null,
+    since: args.since ?? null,
+    mine: args.mine,
+  });
+}
 
 /**
  * Uniform handler wrapper: JSON success payloads, API errors reported as

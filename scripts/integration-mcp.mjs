@@ -41,6 +41,17 @@ const EXPECTED_TOOLS = [
   'take_swap_offer',
   'revert_swap_offer',
   'sponsor_swap',
+  'post_swap_offer',
+  'list_swap_offers',
+  'my_swap_offers',
+  'get_swap_offer',
+  'get_board_status',
+  'retire_swap_offer',
+  'mint_token',
+  'grant_disclosure_to_holders',
+  'revoke_holder_disclosure',
+  'claim_disclosure',
+  'holder_claim_key',
   'get_job_status',
 ];
 
@@ -239,11 +250,39 @@ const oneHalf = await swapCall('sponsor_swap', { makerHalf: 'A'.repeat(64), spon
 if (!said(oneHalf, /makerHalf AND takerHalf, or halfId alone/)) fail(`sponsor_swap accepted one half: ${JSON.stringify(oneHalf).slice(0, 200)}`);
 const noHalf = await swapCall('sponsor_swap', { sponsorSessionId: POOL });
 if (!said(noHalf, /makerHalf and takerHalf, or the halfId/)) fail(`sponsor_swap accepted a call without halves: ${JSON.stringify(noHalf).slice(0, 200)}`);
+const offerNoTaker = await swapCall('sponsor_swap', { offerId: '00000000-0000-4000-8000-000000000001', sponsorSessionId: POOL });
+if (!said(offerNoTaker, /offerId needs takerHalf/)) fail(`sponsor_swap accepted an offerId without the taker half: ${JSON.stringify(offerNoTaker).slice(0, 200)}`);
 const unknownHalf = await swapCall('sponsor_swap', { halfId: '0'.repeat(32), sponsorSessionId: POOL });
 if (!said(unknownHalf, /no half with id 0{32} is held/)) fail(`sponsor_swap accepted an id it does not hold: ${JSON.stringify(unknownHalf).slice(0, 200)}`);
+const offerUnknownHalf = await swapCall('sponsor_swap', { offerId: '00000000-0000-4000-8000-000000000001', halfId: '0'.repeat(32), sponsorSessionId: POOL });
+if (!said(offerUnknownHalf, /no half with id 0{32} is held/)) fail(`sponsor_swap with offerId did not look up the half id: ${JSON.stringify(offerUnknownHalf).slice(0, 200)}`);
 const unknownRevert = await swapCall('revert_swap_offer', { id: '0'.repeat(32) });
 if (!said(unknownRevert, /no half with id 0{32}/)) fail(`revert_swap_offer accepted an id it does not hold: ${JSON.stringify(unknownRevert).slice(0, 200)}`);
-console.log('OK: sponsor_swap takes both halves or a held half id, revert_swap_offer a held id');
+console.log('OK: sponsor_swap takes both halves, a held half id, or a board offer plus the taker half; revert_swap_offer a held id');
+
+const badStatus = await swapCall('list_swap_offers', { status: 'closed' });
+if (!said(badStatus, /status/)) fail(`list_swap_offers accepted an unknown status: ${JSON.stringify(badStatus).slice(0, 200)}`);
+const badSince = await swapCall('my_swap_offers', { since: 'yesterday' });
+if (!said(badSince, /since/)) fail(`my_swap_offers accepted a non-ISO since: ${JSON.stringify(badSince).slice(0, 200)}`);
+const badOfferId = await swapCall('get_swap_offer', { offerId: 'not-a-uuid' });
+if (!said(badOfferId, /offerId/)) fail(`get_swap_offer accepted a non-uuid id: ${JSON.stringify(badOfferId).slice(0, 200)}`);
+const mintArgs = { contractAddress: 'c'.repeat(64), name: 'CREDIT', amount: '1000', recipientCoinPublicKey: 'd'.repeat(64), sessionId: POOL };
+const longName = await swapCall('mint_token', { ...mintArgs, name: 'x'.repeat(33) });
+if (!said(longName, /32 UTF-8 bytes/)) fail(`mint_token accepted a 33-byte name: ${JSON.stringify(longName).slice(0, 200)}`);
+const wideName = await swapCall('mint_token', { ...mintArgs, name: '\u20ac'.repeat(11) });
+if (!said(wideName, /32 UTF-8 bytes/)) fail(`mint_token counted characters, not bytes: ${JSON.stringify(wideName).slice(0, 200)}`);
+const zeroMint = await swapCall('mint_token', { ...mintArgs, amount: '0' });
+if (!said(zeroMint, /positive integer/)) fail(`mint_token accepted amount 0: ${JSON.stringify(zeroMint).slice(0, 200)}`);
+const shortKey = await swapCall('mint_token', { ...mintArgs, recipientCoinPublicKey: 'abc' });
+if (!said(shortKey, /recipientCoinPublicKey/)) fail(`mint_token accepted a short recipient key: ${JSON.stringify(shortKey).slice(0, 200)}`);
+// Local way: a foreign recipient needs both keys; without a seed the issuer is missing. Both refuse before any build.
+const { sessionId: _s, ...localArgs } = mintArgs;
+const foreignNoEnc = await swapCall('mint_token', localArgs);
+if (!said(foreignNoEnc, /recipientEncryptionPublicKey|NIGHTGATE_SEED_HEX|nightgate-tx/)) fail(`mint_token built for a foreign recipient without its encryption key: ${JSON.stringify(foreignNoEnc).slice(0, 200)}`);
+console.log('OK: mint_token checks name, amount, recipient keys before any call');
+const hugeMint = await swapCall('mint_token', { ...mintArgs, amount: 1e21 });
+if (!hugeMint.isError) fail('mint_token accepted a number above 2^53 (String() would render it as 1e+21)');
+console.log('OK: list_swap_offers, my_swap_offers and get_swap_offer validate status, since and offerId; mint_token name, amount and recipient key');
 
 const notAnOffer = await swapCall('read_swap_offer', { offer: 'swapoffer1' + 'q'.repeat(40) });
 if (!notAnOffer.isError) fail('read_swap_offer accepted text that is no offer');

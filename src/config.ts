@@ -21,6 +21,8 @@ export interface NightgateMcpConfig {
   password?: string;
   /** OData service path of the main Nightgate service. */
   servicePath: string;
+  /** OData service path of the indexer service (the anonymous status reads). */
+  indexerServicePath: string;
   /**
    * Absolute URL of ODATANO ASTRA, the analytics service. Default `<baseUrl>/odata/v4/astra`,
    * which is where the gateway serves it; an own deployment sets ODATANO_ANALYTICS_URL to its
@@ -77,6 +79,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): NightgateMcpCo
     username: env.ODATANO_ACCESS_USER || undefined,
     password: env.ODATANO_ACCESS_PASSWORD || undefined,
     servicePath: env.NIGHTGATE_SERVICE_PATH ?? '/api/v1/nightgate',
+    indexerServicePath: env.NIGHTGATE_INDEXER_SERVICE_PATH ?? '/api/v1/indexer',
     analyticsUrl,
     timeoutMs,
     seedHex,

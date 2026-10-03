@@ -8,6 +8,7 @@ import { createHash } from 'node:crypto';
 import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import type { NightgateMcpConfig } from './config.js';
+import { txExport } from './tx-module.js';
 
 export interface SwapLeg {
   tokenType: string;
@@ -30,21 +31,17 @@ let modulePromise: Promise<TxSwapModule> | undefined;
 
 async function loadSwapModule(): Promise<TxSwapModule> {
   modulePromise ??= (async (): Promise<TxSwapModule> => {
-    let tx: any;
     try {
-      tx = await import('@odatano/nightgate-tx/txbuilder');
+      const [createSwapWallet, readSwapTerms, decodeOffer] = await Promise.all([
+        txExport<TxSwapModule['createSwapWallet']>('createSwapWallet', 'swaps', '0.8.0'),
+        txExport<TxSwapModule['readSwapTerms']>('readSwapTerms', 'swaps', '0.8.0'),
+        txExport<TxSwapModule['decodeOffer']>('decodeOffer', 'swaps', '0.8.0'),
+      ]);
+      return { createSwapWallet, readSwapTerms, decodeOffer };
     } catch (err) {
       modulePromise = undefined;
-      throw new Error(
-        'swaps need @odatano/nightgate-tx >= 0.8.0 next to the MCP server (npm install @odatano/nightgate-tx): ' +
-        (err instanceof Error ? err.message : String(err)),
-      );
+      throw err;
     }
-    if (typeof tx.createSwapWallet !== 'function' || typeof tx.decodeOffer !== 'function') {
-      modulePromise = undefined;
-      throw new Error('swaps need @odatano/nightgate-tx >= 0.8.0; the installed version has no swap wallet (npm install @odatano/nightgate-tx@latest)');
-    }
-    return { createSwapWallet: tx.createSwapWallet, readSwapTerms: tx.readSwapTerms, decodeOffer: tx.decodeOffer };
   })();
   return modulePromise;
 }
@@ -68,6 +65,13 @@ export async function readOffer(offer: string): Promise<SwapTermsOut & { bound: 
   const { decodeOffer, readSwapTerms } = await loadSwapModule();
   const decoded = await decodeOffer(offer);
   return { ...termsOut(readSwapTerms(decoded.tx)), bound: decoded.bound, serializedBytes: decoded.bytes.length };
+}
+
+/** Do two offer texts (file or base64, either form) carry the same transaction? */
+export async function sameOffer(a: string, b: string): Promise<boolean> {
+  const { decodeOffer } = await loadSwapModule();
+  const [x, y] = await Promise.all([decodeOffer(a), decodeOffer(b)]);
+  return x.bytes.length === y.bytes.length && x.bytes.every((byte, i) => byte === y.bytes[i]);
 }
 
 interface OpenWallet {

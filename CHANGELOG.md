@@ -7,6 +7,38 @@ The README says which NIGHTGATE the current version needs.
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-10-02
+
+### Added
+
+- **Offer board** (NIGHTGATE 0.30.0): `post_swap_offer(offer, expiresAt?, tags?)`,
+  `list_swap_offers(givesType?, wantsType?, tag?, limit?)`, `retire_swap_offer(offerId)`.
+  `sponsor_swap` and `take_swap_offer` take an `offerId` from the board in place of the
+  maker half: `take_swap_offer` reads the entry first and refuses before proving when it
+  is closed or carries another offer; `sponsor_swap` pairs `offerId` with `takerHalf` or
+  the `halfId` of a taken offer.
+- **Board reads** (NIGHTGATE 0.30.1): `list_swap_offers(status?, since?)` reads closed
+  offers and the change feed, `my_swap_offers(status?, since?, limit?)` the caller's own
+  posts, `get_swap_offer(offerId)` one offer open or closed, `get_board_status()` the
+  board's counts and sponsor readiness without credentials (indexer service,
+  `NIGHTGATE_INDEXER_SERVICE_PATH`, default `/api/v1/indexer`).
+- **`mint_token(contractAddress, name, amount, recipientCoinPublicKey?, recipientEncryptionPublicKey?, sponsorSessionId?, sessionId?, idempotencyKey?)`**:
+  a token of your own name on a token factory. Without `sessionId` the seed is the issuer,
+  the mint is built, proven and signed here (`@odatano/nightgate-tx` 0.10.2 on
+  `@odatano/contract-token-factory`) and `sponsorUnboundTransaction` pays; with `sessionId`
+  the server session mints (`mintFactoryToken`, NIGHTGATE 0.30.1). The recipient defaults
+  to this wallet; another wallet takes both of its keys. The type is in the response.
+- **Disclosure to token holders**: `grant_disclosure_to_holders(payloadHash, tokenType,
+  registryAddress, content?, contentType?, expiresAt?)`, `revoke_holder_disclosure(holderGrantId)`,
+  `claim_disclosure(payloadHash, tokenType, claimSecret)`, `holder_claim_key(claimSecret?)`.
+
+### Changed
+
+- Peer dependency `@odatano/nightgate-tx` `>=0.10.2` (`holderClaimKey`, `tokenFactoryIssuerSecret`); local building and swaps still run on 0.8.0. A missing or older install is reported per tool with the version it needs. Optional peer `@odatano/contract-token-factory` for local minting.
+- `mint_token` derives the default recipient from the seed without starting the local builder.
+- Amounts given as JS numbers must be safe integers; pass a decimal string for anything larger.
+- Function calls pass an unused declared parameter as `null`.
+
 ## [0.9.0] - 2026-09-30
 
 ### Added
