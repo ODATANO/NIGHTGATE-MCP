@@ -27,9 +27,11 @@ const makerTerms = { gives: { tokenType: A, amount: 1000n }, wants: { tokenType:
 
 const calls = { created: [], built: [], reverted: [], closed: 0, posts: [] };
 let halfCount = 0;
+const offerBytes = new Map();
 const halfOf = (give, want, bind) => {
   const n = ++halfCount;
-  const bytes = Buffer.from(`half-${n}`.padEnd(64, '.'));
+  const bytes = Buffer.from(`half-${n}`.padEnd(15477, '.'));
+  if (bind) offerBytes.set(`${OFFER}${n}`, new Uint8Array(bytes));
   return {
     tx: {}, bound: bind, serializedBytes: 15477,
     halfB64: bytes.toString('base64'),
@@ -59,7 +61,7 @@ __setSwapModuleForTests({
   createSwapWallet: async (opts) => { calls.created.push(opts); return wallet; },
   decodeOffer: async (input) => {
     if (!String(input).startsWith(OFFER)) throw new Error('not an offer file and not base64');
-    return { tx: { terms: makerTerms }, bound: true, bytes: new Uint8Array(15477) };
+    return { tx: { terms: makerTerms }, bound: true, bytes: offerBytes.get(String(input)) ?? new Uint8Array(15477) };
   },
   readSwapTerms: (tx) => tx.terms,
 });
@@ -67,8 +69,11 @@ __setSwapModuleForTests({
 // The transport: one refusal, then jobs.
 let refuseNext = true;
 let jobStatus = 'running';
+const OFFER_ID = '99999999-8888-4777-8666-555555555555';
+let boardStatus = 'open';
+const boardRow = () => ({ offerId: OFFER_ID, status: boardStatus, tags: ['otc'] });
 globalThis.fetch = async (url, init) => {
-  const name = String(url).split('/').pop();
+  const name = String(url).split('/').pop().split('(')[0];
   const body = init?.body ? JSON.parse(init.body) : undefined;
   calls.posts.push({ name, body });
   const json = (status, payload) => new Response(JSON.stringify(payload), { status, headers: { 'content-type': 'application/json' } });
@@ -77,6 +82,9 @@ globalThis.fetch = async (url, init) => {
     return json(200, { jobId: JOB, status: 'pending', sessionId: POOL });
   }
   if (name === 'getJobStatus') return json(200, { jobId: JOB, status: jobStatus });
+  if (name === 'postSwapOffer') return json(200, { offerId: OFFER_ID, status: 'open' });
+  if (name === 'getSwapOffer') return json(200, boardRow());
+  if (name === 'listSwapOffers') return json(200, { value: [boardRow()] });
   return json(404, { error: { code: '404', message: `unexpected request ${name}` } });
 };
 
@@ -188,6 +196,24 @@ try {
   const twice = await mcp.call('revert_swap_offer', { id: built.value.id });
   if (!twice.isError) fail('revert_swap_offer reverted the same half twice');
   console.log('OK: revert_swap_offer releases a half once');
+
+  // A posted half follows its board entry: an expired one stays revertable, a filled one leaves.
+  const maker = await mcp.call('build_swap_offer', { give: { tokenType: A, amount: '500' }, want: { tokenType: B, amount: '150' } });
+  const posted = await mcp.call('post_swap_offer', { offer: maker.value.offer, tags: ['otc'] });
+  if (posted.isError || posted.value.offerId !== OFFER_ID) fail(`post_swap_offer: ${posted.text.slice(0, 300)}`);
+  w = await mcp.call('get_swap_wallet');
+  const tied = w.value.pendingHalves.find((p) => p.id === maker.value.id);
+  if (tied?.offerId !== OFFER_ID || tied.boardStatus !== 'open') fail(`posted half not tied to its offer: ${JSON.stringify(w.value.pendingHalves)}`);
+  boardStatus = 'expired';
+  await mcp.call('my_swap_offers');
+  w = await mcp.call('get_swap_wallet');
+  if (w.value.pendingHalves.find((p) => p.id === maker.value.id)?.boardStatus !== 'expired') fail(`expired offer: ${JSON.stringify(w.value.pendingHalves)}`);
+  boardStatus = 'filled';
+  w = await mcp.call('get_swap_wallet');
+  if (w.value.pendingHalves.some((p) => p.id === maker.value.id)) fail(`a filled offer kept its half: ${JSON.stringify(w.value.pendingHalves)}`);
+  const revertFilled = await mcp.call('revert_swap_offer', { id: maker.value.id });
+  if (!revertFilled.isError || !/no half with id/.test(revertFilled.text) || calls.reverted.length !== 1) fail(`revert after fill: ${revertFilled.text.slice(0, 300)}`);
+  console.log('OK: a posted half carries its offerId, stays revertable when expired and leaves the list once filled');
 
   // A restart resumes from the state file.
   await closeSwapWallet();

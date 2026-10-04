@@ -93,11 +93,15 @@ interface PendingHalf {
   halves?: { makerHalfB64: string; takerHalfB64: string };
   /** The sponsor job the half went into. */
   jobId?: string;
+  /** The board entry a maker half was posted as, and its last read status. */
+  offerId?: string;
+  boardStatus?: string;
 }
 /** Halves built here whose swap has not landed, by id. */
 const pending = new Map<string, PendingHalf>();
 
-const halfId = (halfB64: string): string => createHash('sha256').update(Buffer.from(halfB64, 'base64')).digest('hex').slice(0, 32);
+const halfIdOf = (bytes: Uint8Array): string => createHash('sha256').update(bytes).digest('hex').slice(0, 32);
+const halfId = (halfB64: string): string => halfIdOf(Buffer.from(halfB64, 'base64'));
 
 async function readState(path: string | undefined): Promise<string | undefined> {
   if (!path) return undefined;
@@ -209,7 +213,10 @@ export async function swapWalletInfo(config: NightgateMcpConfig): Promise<Record
   for (const [tokenType, t] of byType) {
     tokens.push({ tokenType, balance: t.balance.toString(), coins: t.coins, spendable: String(await wallet.spendable(tokenType)) });
   }
-  const pendingHalves = [...pending.entries()].map(([id, p]) => ({ id, role: p.role, ...(p.jobId ? { jobId: p.jobId } : {}), ...p.terms }));
+  const pendingHalves = [...pending.entries()].map(([id, p]) => ({
+    id, role: p.role, ...(p.jobId ? { jobId: p.jobId } : {}),
+    ...(p.offerId ? { offerId: p.offerId, boardStatus: p.boardStatus ?? 'open' } : {}), ...p.terms,
+  }));
   return { ...base, synced: true, tokens, pendingHalves };
 }
 
@@ -288,6 +295,37 @@ export function trackHalfJob(id: string, jobId: unknown): void {
 export function settleHalfJob(jobId: string, status: unknown): void {
   if (status !== 'succeeded') return;
   for (const [id, half] of pending) if (half.jobId === jobId) pending.delete(id);
+}
+
+/** Ties a maker half built here to the board entry it was posted as; any other offer is ignored. */
+export async function trackPostedHalf(offer: string, offerId: unknown): Promise<void> {
+  if (typeof offerId !== 'string' || ![...pending.values()].some((p) => p.role === 'maker')) return;
+  const { decodeOffer } = await loadSwapModule();
+  const half = pending.get(halfIdOf((await decodeOffer(offer)).bytes));
+  if (half?.role === 'maker') half.offerId = offerId;
+}
+
+/** Board entries of the maker halves held here. */
+export function postedOfferIds(): string[] {
+  return [...pending.values()].flatMap((p) => (p.offerId ? [p.offerId] : []));
+}
+
+/**
+ * Board rows (one, an array or an OData collection) settle the halves posted as them:
+ * a filled offer spent the half's coins, so it leaves; an expired or retired one stays revertable.
+ */
+export function settleBoardRows(result: unknown): void {
+  const value = (result as { value?: unknown })?.value;
+  const rows = Array.isArray(result) ? result : Array.isArray(value) ? value : [result];
+  for (const row of rows) {
+    const { offerId, status } = (row ?? {}) as { offerId?: unknown; status?: unknown };
+    if (typeof offerId !== 'string' || typeof status !== 'string') continue;
+    for (const [id, half] of pending) {
+      if (half.offerId !== offerId) continue;
+      if (status === 'filled') pending.delete(id);
+      else half.boardStatus = status;
+    }
+  }
 }
 
 /** Test seam / shutdown. */

@@ -7,6 +7,16 @@ The README says which NIGHTGATE the current version needs.
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-10-03
+
+### Fixed
+
+- A maker half posted with `post_swap_offer` is tied to its `offerId`; `get_swap_wallet`
+  lists it with `offerId` and `boardStatus` and drops it once the offer is `filled`
+  (read through `get_swap_wallet`, `get_swap_offer`, `list_swap_offers`, `my_swap_offers`).
+  An expired or retired offer keeps its half for `revert_swap_offer`.
+- Board rows carry `tags` as the server sends them: an array from NIGHTGATE 0.30.3 on.
+
 ## [0.10.0] - 2026-10-02
 
 ### Added

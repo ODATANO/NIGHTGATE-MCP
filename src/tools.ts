@@ -3,7 +3,10 @@ import { z } from 'zod';
 import { int64, raw, NightgateApiError, NightgateClient } from './client.js';
 import type { NightgateMcpConfig } from './config.js';
 import { BUILDABLE_CALLS, BUILDABLE_ARTIFACTS, buildSponsorable, attesterIdentity, seedIdentity } from './builder.js';
-import { buildOffer, readOffer, revertHalf, sameOffer, settleHalfJob, swapWalletInfo, takenHalves, takeOffer, trackHalfJob } from './swap.js';
+import {
+  buildOffer, postedOfferIds, readOffer, revertHalf, sameOffer, settleBoardRows, settleHalfJob, swapWalletInfo, takenHalves,
+  takeOffer, trackHalfJob, trackPostedHalf,
+} from './swap.js';
 import { txExport } from './tx-module.js';
 import { buildMint } from './factory.js';
 
@@ -1052,13 +1055,17 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         'The shielded wallet this MCP server swaps from (seed from NIGHTGATE_SEED_HEX): address, ' +
         'public keys, and per token type the balance, the number of free coins and `spendable`, ' +
         'the most ONE swap half can give (what its largest coins hold, up to maxInputs coins). ' +
-        'Also lists the halves built here that are not handed over yet. The wallet syncs its ' +
+        'Also lists the halves built here that are not handed over yet; one posted with ' +
+        'post_swap_offer carries offerId and boardStatus and leaves the list once its offer filled. The wallet syncs its ' +
         'shielded coins only; a first sync from genesis takes about 5 minutes, during which the ' +
         'answer is { synced: false, syncingSeconds }: call again. Spends nothing.',
       inputSchema: {},
     },
     run(async () => {
       if (!config) throw new Error('swaps are not configured for this server instance');
+      for (const offerId of postedOfferIds()) {
+        settleBoardRows(await client.callFunction('getSwapOffer', { offerId: raw(offerId) }).catch(() => undefined));
+      }
       return swapWalletInfo(config);
     }),
   );
@@ -1251,12 +1258,15 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         tags: z.array(z.string().min(1).max(40)).max(8).optional().describe('Up to 8 tags for list_swap_offers'),
       },
     },
-    run(async (args) =>
-      client.callAction('postSwapOffer', {
+    run(async (args) => {
+      const posted = await client.callAction('postSwapOffer', {
         offer: args.offer,
         expiresAt: args.expiresAt,
         tags: args.tags ? JSON.stringify(args.tags) : undefined,
-      })),
+      }) as Record<string, unknown> | undefined;
+      await trackPostedHalf(args.offer, posted?.offerId).catch(() => { /* posted; the half is just not tied to it */ });
+      return posted;
+    }),
   );
 
   server.registerTool(
@@ -1277,7 +1287,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         since: z.string().datetime().optional().describe('ISO timestamp; only offers changed after it'),
       },
     },
-    run(async (args) => listOffers(client, { ...args, mine: null })),
+    run(async (args) => settled(await listOffers(client, { ...args, mine: null }))),
   );
 
   server.registerTool(
@@ -1294,7 +1304,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         limit: z.number().int().min(1).max(200).optional().describe('Default 50'),
       },
     },
-    run(async (args) => listOffers(client, { status: args.status ?? 'all', since: args.since, limit: args.limit, mine: true })),
+    run(async (args) => settled(await listOffers(client, { status: args.status ?? 'all', since: args.since, limit: args.limit, mine: true }))),
   );
 
   server.registerTool(
@@ -1308,7 +1318,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         offerId: z.string().uuid().describe('The board entry'),
       },
     },
-    run(async (args) => client.callFunction('getSwapOffer', { offerId: raw(args.offerId) })),
+    run(async (args) => settled(await client.callFunction('getSwapOffer', { offerId: raw(args.offerId) }))),
   );
 
   server.registerTool(
@@ -1552,6 +1562,12 @@ type ToolResult = {
 };
 
 /** listSwapOffers wants all seven parameters, null for the unused ones. */
+/** Board rows pass through unchanged after settling the maker halves posted as them. */
+function settled<T>(rows: T): T {
+  settleBoardRows(rows);
+  return rows;
+}
+
 function listOffers(client: NightgateClient, args: {
   givesType?: string; wantsType?: string; tag?: string; limit?: number; status?: string; since?: string; mine: boolean | null;
 }): Promise<unknown> {
