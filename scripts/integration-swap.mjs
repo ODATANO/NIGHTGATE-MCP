@@ -145,28 +145,28 @@ try {
 
   // Taking an offer: other terms than expected stop it before anything is sent.
   const wrong = await mcp.call('take_swap_offer', {
-    offer: OFFER, sponsorSessionId: POOL,
+    offer: OFFER, submit: true,
     expect: { gives: { tokenType: A, amount: '999' }, wants: { tokenType: B, amount: '300' } },
   });
   if (!wrong.isError || !/not what was expected/.test(wrong.text) || calls.posts.length !== 0) fail(`take_swap_offer took an offer with other terms: ${wrong.text.slice(0, 300)}`);
 
   // A refusal keeps the proven half, under its id.
   const expect = { gives: { tokenType: A, amount: '1000' }, wants: { tokenType: B, amount: '300' } };
-  const refused = await mcp.call('take_swap_offer', { offer: OFFER, expect, sponsorSessionId: POOL, idempotencyKey: 'k1' });
+  const refused = await mcp.call('take_swap_offer', { offer: OFFER, expect, submit: true, idempotencyKey: 'k1' });
   if (!refused.isError || refused.value.code !== 'SPONSOR_POLICY_EMPTY' || refused.value.httpStatus !== 503 || !/^[0-9a-f]{32}$/.test(refused.value.halfId ?? '')) {
     fail(`take_swap_offer refusal: ${refused.text.slice(0, 300)}`);
   }
   const takenId = refused.value.halfId;
   const sent = calls.posts[0].body;
-  if (sent.makerHalfB64 !== Buffer.from(OFFER).toString('base64') || !sent.takerHalfB64 || sent.sponsorSessionId !== POOL || sent.idempotencyKey !== 'k1') fail(`sponsorSwap body: ${JSON.stringify(sent).slice(0, 300)}`);
+  if (sent.makerHalfB64 !== Buffer.from(OFFER).toString('base64') || !sent.takerHalfB64 || 'sponsorSessionId' in sent || sent.idempotencyKey !== 'k1') fail(`sponsorSwap body: ${JSON.stringify(sent).slice(0, 300)}`);
   w = await mcp.call('get_swap_wallet');
   if (!same(w.value.pendingHalves.map((p) => [p.id, p.role, p.jobId]), [[built.value.id, 'maker', undefined], [takenId, 'taker', undefined]])) fail(`pending halves after the refusal: ${JSON.stringify(w.value.pendingHalves)}`);
   console.log('OK: take_swap_offer compares the terms, a refused swap keeps its half under halfId');
 
   // The held half goes out again by id.
-  const makerOnly = await mcp.call('sponsor_swap', { halfId: built.value.id, sponsorSessionId: POOL });
+  const makerOnly = await mcp.call('sponsor_swap', { halfId: built.value.id });
   if (!makerOnly.isError || !/an offer built here, not a taken one/.test(makerOnly.text)) fail(`sponsor_swap sent an offer without its taker: ${makerOnly.text.slice(0, 300)}`);
-  const job = await mcp.call('sponsor_swap', { halfId: takenId, sponsorSessionId: POOL });
+  const job = await mcp.call('sponsor_swap', { halfId: takenId });
   if (job.isError || job.value.jobId !== JOB) fail(`sponsor_swap by id: ${job.text.slice(0, 300)}`);
   const again = calls.posts.at(-1).body;
   if (again.makerHalfB64 !== sent.makerHalfB64 || again.takerHalfB64 !== sent.takerHalfB64) fail('sponsor_swap by id sent other halves than the taken ones');
@@ -186,7 +186,7 @@ try {
   console.log('OK: sponsor_swap by halfId, the half leaves the list when its job has succeeded');
 
   // Both halves passed in, as they arrive from elsewhere.
-  const direct = await mcp.call('sponsor_swap', { makerHalf: built.value.offer, takerHalf: 'B'.repeat(64), sponsorSessionId: POOL, halfId: built.value.id });
+  const direct = await mcp.call('sponsor_swap', { makerHalf: built.value.offer, takerHalf: 'B'.repeat(64), halfId: built.value.id });
   if (direct.isError) fail(`sponsor_swap with both halves: ${direct.text.slice(0, 300)}`);
   if (calls.posts.at(-1).body.makerHalfB64 !== built.value.offer) fail('sponsor_swap did not pass the offer file through');
 

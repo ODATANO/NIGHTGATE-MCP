@@ -7,6 +7,19 @@ The README says which NIGHTGATE the current version needs.
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-10-12
+
+Needs NIGHTGATE 0.32.0.
+
+### Changed
+
+- `sponsor_finalized_transaction`, `sponsor_unbound_transaction`, `sponsor_swap`
+  and `mint_token` take no `sponsorSessionId`: the server's sponsor pool pays,
+  or the wallet session the agent grant is pinned to.
+- `take_swap_offer`: `submit: true` hands both halves to the sponsor at once;
+  it replaces the sponsor session id as the trigger.
+- The platform pool id is gone from every tool description.
+
 ## [0.10.1] - 2026-10-03
 
 ### Fixed

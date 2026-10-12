@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 /**
- * Live lane (optional, needs network + a NIGHTGATE >= 0.18.0 with a sponsor
- * or sponsor pool): the whole agent path through the MCP tools, authenticated
- * with an AGENT-GRANT TOKEN only.
+ * Live lane (optional, needs network + a NIGHTGATE with a sponsor pool): the
+ * whole agent path through the MCP tools, authenticated with an AGENT-GRANT
+ * TOKEN only.
  *
  *   build_sponsorable_transaction (local, seed from NIGHTGATE_SEED_HEX)
- *     -> sponsor_unbound_transaction (the sponsor / pool pays the dust)
+ *     -> sponsor_unbound_transaction (the server's pool pays the dust)
  *     -> get_job_status until terminal
  *     -> verify_attestation (crawler-free, attester id must be OURS)
  *
@@ -13,7 +13,7 @@
  *
  *   ODATANO_ACCESS_URL=https://api.preprod.odatano.dev ODATANO_ACCESS_KEY=oda_... \
  *   NIGHTGATE_SEED_HEX=<128 hex, a throwaway is fine> \
- *   NIGHTGATE_VAULT=<vault address> NIGHTGATE_SPONSOR_SESSION_ID=<sponsor or pool id> \
+ *   NIGHTGATE_VAULT=<vault address> \
  *   npm run live:sponsor-unbound
  */
 import { randomBytes } from 'node:crypto';
@@ -24,7 +24,6 @@ import { loadConfig } from '../dist/config.js';
 import { closeBuilder } from '../dist/builder.js';
 
 const VAULT = process.env.NIGHTGATE_VAULT;
-const SPONSOR = process.env.NIGHTGATE_SPONSOR_SESSION_ID || '00000000-0000-0000-0000-706f6f6c0000';
 // An agent grant token is the POINT of this lane, but a hosted server behind
 // basic auth has to be testable too, so either credential set is accepted and
 // the one in use is printed.
@@ -68,7 +67,7 @@ const built = await call('build_sponsorable_transaction', {
 console.log(`built locally in ${((Date.now() - t0) / 1000).toFixed(1)}s (${built.provingMode}, ${built.serializedBytes} bytes, ${built.channel})`);
 
 const t1 = Date.now();
-const { jobId, sessionId } = await call('sponsor_unbound_transaction', { unboundTxB64: built.unboundTxB64, sponsorSessionId: SPONSOR });
+const { jobId, sessionId } = await call('sponsor_unbound_transaction', { unboundTxB64: built.unboundTxB64 });
 let job;
 for (;;) {
   await new Promise(r => setTimeout(r, 3000));

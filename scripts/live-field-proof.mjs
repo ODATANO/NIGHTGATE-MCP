@@ -24,7 +24,6 @@ import { closeBuilder } from '../dist/builder.js';
 
 const VAULT = process.env.NIGHTGATE_VAULT;
 const ARTIFACT = process.env.NIGHTGATE_VAULT_ARTIFACT || 'attestation-vault';
-const SPONSOR = process.env.NIGHTGATE_SPONSOR_SESSION_ID || '00000000-0000-0000-0000-706f6f6c0000';
 const fail = (m) => { console.error(`FAIL ${m}`); process.exit(1); };
 if (!VAULT || !process.env.ODATANO_ACCESS_URL) fail('need ODATANO_ACCESS_URL and NIGHTGATE_VAULT');
 
@@ -70,7 +69,7 @@ async function submit(label, call_, params, extra = {}) {
     });
     console.log(`  ${label}: proven locally in ${((Date.now() - t0) / 1000).toFixed(1)}s (${built.serializedBytes} B)`);
     const { jobId, sessionId } = await call('sponsor_unbound_transaction', {
-        unboundTxB64: built.unboundTxB64, sponsorSessionId: SPONSOR,
+        unboundTxB64: built.unboundTxB64,
     });
     for (;;) {
         await new Promise((r) => setTimeout(r, 3000));

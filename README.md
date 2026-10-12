@@ -69,8 +69,7 @@ Errors carry the server's HTTP status and `code` (`INVALID_ARGUMENT`, ...).
 
 1. `build_sponsorable_transaction` builds and proves the call locally (needs
    `@odatano/nightgate-tx` installed next to the server and `NIGHTGATE_SEED_HEX`).
-2. `sponsor_unbound_transaction` with a sponsor session id or the platform pool
-   id `00000000-0000-0000-0000-706f6f6c0000`.
+2. `sponsor_unbound_transaction`; the server's sponsor pool pays.
 3. `get_job_status` with the returned `sessionId`, then `verify_attestation`.
 
 `failed` / `CHAIN_EXECUTION_FAILED`: landed but not applied; build again, never
@@ -89,8 +88,8 @@ Needs `@odatano/nightgate-tx` >= 0.8.0 next to the server and `NIGHTGATE_SEED_HE
    (`swapoffer1...`) to publish, or `post_swap_offer` puts it on the server's
    board.
 3. Taker: `list_swap_offers` or `read_swap_offer`, then `take_swap_offer` with
-   `expect`, a `sponsorSessionId` and, for a board entry, its `offerId`. It
-   builds the mirror half and submits both.
+   `expect`, `submit: true` and, for a board entry, its `offerId`. It builds
+   the mirror half and submits both; the server's sponsor pool pays.
 4. `get_job_status` with the returned `sessionId`; the result carries `swap`.
    The maker follows the offer with `get_swap_offer` or `my_swap_offers`
    (`filled` + `filledTxHash`); `list_swap_offers` with `status: all` and
@@ -144,7 +143,7 @@ Then `ODATANO_ACCESS_URL=http://localhost:4004`, `ODATANO_ACCESS_USER=nightgate`
 
 ## Compatibility
 
-NIGHTGATE >= 0.24.0; `chainSegments` needs >= 0.28.0, swaps need >= 0.29.0, the offer board and holder disclosure need >= 0.30.0, `get_swap_offer`, `my_swap_offers`, `get_board_status`, the server way of `mint_token` and the `status`/`since` filters need >= 0.30.1.
+NIGHTGATE >= 0.24.0; `chainSegments` needs >= 0.28.0, swaps need >= 0.29.0, the offer board and holder disclosure need >= 0.30.0, `get_swap_offer`, `my_swap_offers`, `get_board_status`, the server way of `mint_token` and the `status`/`since` filters need >= 0.30.1; the sponsor tools without a sponsor session id need >= 0.32.0.
 `@odatano/nightgate-tx` >= 0.10.2 for local building (local minting also needs `@odatano/contract-token-factory`). Per version: [CHANGELOG](CHANGELOG.md).
 
 Local building needs ONE `@midnight-ntwrk/ledger-v8` in the install
@@ -161,7 +160,7 @@ Live lanes:
 
 ```bash
 NIGHTGATE_LIVE=1 NIGHTGATE_TEST_CONTRACT=<vault> NIGHTGATE_TEST_PAYLOAD_HASH=<64 hex> npm run integration
-NIGHTGATE_SEED_HEX=<hex> NIGHTGATE_VAULT=<vault> NIGHTGATE_SPONSOR_SESSION_ID=<sponsor or pool id> npm run live:sponsor-unbound
+NIGHTGATE_SEED_HEX=<hex> NIGHTGATE_VAULT=<vault> npm run live:sponsor-unbound
 ```
 
 ## License

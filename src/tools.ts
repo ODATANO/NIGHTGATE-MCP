@@ -31,8 +31,6 @@ const setDirs = z.array(z.boolean()).length(6)
   .describe('Exactly 6 booleans; true means the current node is the LEFT child');
 
 const POLL_HINT = 'Async: returns { jobId, status } immediately; poll get_job_status until succeeded or failed.';
-/** NIGHTGATE's platform sponsor pool id (0.17.2+): the server picks a free pool sponsor. */
-const PLATFORM_POOL_SENTINEL = '00000000-0000-0000-0000-706f6f6c0000';
 
 /** One side of a swap: a raw token type and an amount in atoms. */
 const swapLeg = (what: string) => z.object({
@@ -993,14 +991,11 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         'outside it. The transaction expires with its TTL (default 30 min), so hand it over ' +
         'promptly. This is the SERIAL channel (one tx per sponsor wallet at a time); for ' +
         'parallel submission build with bind:false and use sponsor_unbound_transaction. ' +
-        'Poll get_job_status with the sessionId RETURNED by this call (the sponsor the job ' +
-        'is keyed by; with the platform pool that is the pool id). ' + POLL_HINT,
+        'The server picks the wallet that pays. Poll get_job_status with the sessionId ' +
+        'RETURNED by this call. ' + POLL_HINT,
       inputSchema: {
         finalizedTxB64: z.string().min(1)
           .describe('Base64 of the caller-finalized, fee-unpaid transaction (~7000 chars for a vault call)'),
-        sponsorSessionId: z.string().uuid()
-          .describe('Wallet session that pays the dust and submits, or the platform sponsor POOL id ' +
-            `${PLATFORM_POOL_SENTINEL} (the server picks a free pool sponsor and fails over between them)`),
         idempotencyKey: z.string().optional()
           .describe('Dedupes retries; the request is also fingerprinted by the transaction bytes'),
       },
@@ -1008,7 +1003,6 @@ export function registerTools(server: McpServer, client: NightgateClient, config
     run(async (args) =>
       client.callAction('sponsorFinalizedTransaction', {
         finalizedTxB64: args.finalizedTxB64,
-        sponsorSessionId: args.sponsorSessionId,
         idempotencyKey: args.idempotencyKey,
       })),
   );
@@ -1023,7 +1017,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         'The sponsor locks one free dust backing, merges its dust spend, binds and submits; only ' +
         'the dust build takes the per-wallet lock, so ONE sponsor wallet sponsors N transactions ' +
         'at once (N = its registered dust backings; live: several in the same block). Same ' +
-        'allow-list policy, pool and grant surface as sponsor_finalized_transaction; do not mix ' +
+        'allow-list policy and grant surface as sponsor_finalized_transaction; do not mix ' +
         'both channels on one sponsor wallet. Contract state is account-style: two sponsored ' +
         'calls against the SAME contract in one block conflict, the loser lands on-chain but its ' +
         'call does not apply and the job ends failed with errorCode CHAIN_EXECUTION_FAILED (the ' +
@@ -1033,9 +1027,6 @@ export function registerTools(server: McpServer, client: NightgateClient, config
       inputSchema: {
         unboundTxB64: z.string().min(1)
           .describe('Base64 of the caller-built, proven and signed UNBOUND transaction (bind:false output)'),
-        sponsorSessionId: z.string().uuid()
-          .describe('Wallet session that pays the dust and submits, or the platform sponsor POOL id ' +
-            `${PLATFORM_POOL_SENTINEL}`),
         idempotencyKey: z.string().optional()
           .describe('Dedupes retries of the SAME bytes; a rebuilt transaction is a new key'),
       },
@@ -1043,7 +1034,6 @@ export function registerTools(server: McpServer, client: NightgateClient, config
     run(async (args) =>
       client.callAction('sponsorUnboundTransaction', {
         unboundTxB64: args.unboundTxB64,
-        sponsorSessionId: args.sponsorSessionId,
         idempotencyKey: args.idempotencyKey,
       })),
   );
@@ -1119,21 +1109,21 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         SWAP_HINT + ' This takes an offer: it reads the offer\'s terms from the transaction, ' +
         'refuses when they differ from `expect`, builds and proves the mirror half from this ' +
         'server\'s wallet (it spends what the offer wants and creates what the offer gives). ' +
-        'With sponsorSessionId the two halves go to the sponsor at once and the answer is the ' +
+        'With submit: true the two halves go to the sponsor at once and the answer is the ' +
         'job ({ jobId, status, sessionId, id, terms }): poll get_job_status with the returned ' +
         'sessionId. Without it the answer carries both halves for sponsor_swap. ALWAYS pass ' +
         '`expect` with the terms you agreed to: an offer is text from someone else. With offerId ' +
         'the board entry is read first and the call refuses, before proving, when it is not open ' +
         'or carries another offer than `offer`. A sponsor that refuses the swap leaves the proven ' +
-        'half held under `halfId`: send it again with sponsor_swap({ halfId, offerId?, ' +
-        'sponsorSessionId }) or release its coins with revert_swap_offer. If the offer was taken ' +
-        'by somebody else first, the job fails: revert_swap_offer.',
+        'half held under `halfId`: send it again with sponsor_swap({ halfId, offerId? }) or ' +
+        'release its coins with revert_swap_offer. If the offer was taken by somebody else ' +
+        'first, the job fails: revert_swap_offer.',
       inputSchema: {
         offer: swapHalf('The offer to take'),
         expect: z.object({ gives: swapLeg('expect.gives'), wants: swapLeg('expect.wants') }).optional()
           .describe("The terms you agreed to, from the MAKER's side: what the offer gives and what it wants"),
-        sponsorSessionId: z.string().uuid().optional()
-          .describe('Sponsor session or the platform sponsor POOL id ' + `${PLATFORM_POOL_SENTINEL}` + '; when given the swap is submitted at once'),
+        submit: z.boolean().optional()
+          .describe('true: hand both halves to the sponsor at once and answer with the job'),
         idempotencyKey: z.string().optional().describe('Dedupes retries of the same submission'),
         offerId: z.string().uuid().optional()
           .describe('The board entry the offer came from (list_swap_offers), so the fill is recorded against it'),
@@ -1152,13 +1142,12 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         offer: args.offer,
         ...(args.expect ? { expect: { gives: legOut(args.expect.gives), wants: legOut(args.expect.wants) } } : {}),
       });
-      if (!args.sponsorSessionId) return taken;
+      if (args.submit !== true) return taken;
       let job: Record<string, unknown>;
       try {
         job = await client.callAction('sponsorSwap', {
           ...(args.offerId ? { offerId: args.offerId } : { makerHalfB64: taken.makerHalfB64 }),
           takerHalfB64: taken.takerHalfB64,
-          sponsorSessionId: args.sponsorSessionId,
           idempotencyKey: args.idempotencyKey,
         }) as Record<string, unknown>;
       } catch (err) {
@@ -1207,9 +1196,6 @@ export function registerTools(server: McpServer, client: NightgateClient, config
       inputSchema: {
         makerHalf: swapHalf("The maker's half (the offer)").optional(),
         takerHalf: swapHalf("The taker's half").optional(),
-        sponsorSessionId: z.string().uuid()
-          .describe('Wallet session that pays the dust and submits, or the platform sponsor POOL id ' +
-            `${PLATFORM_POOL_SENTINEL}`),
         idempotencyKey: z.string().optional()
           .describe('Dedupes retries of the SAME two halves'),
         halfId: z.string().regex(/^[0-9a-f]{32}$/, 'halfId must be the 32 hex characters a swap tool returned').optional()
@@ -1234,7 +1220,6 @@ export function registerTools(server: McpServer, client: NightgateClient, config
       }
       const job = await client.callAction('sponsorSwap', {
         ...halves,
-        sponsorSessionId: args.sponsorSessionId,
         idempotencyKey: args.idempotencyKey,
       }) as Record<string, unknown>;
       if (args.halfId) trackHalfJob(args.halfId, job?.jobId);
@@ -1461,8 +1446,8 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         'Mint a shielded token with a name of your own on a token-factory deployment. Two ways. ' +
         'LOCAL (default, no sessionId): this process is the issuer, its issuer secret derives from ' +
         'NIGHTGATE_SEED_HEX, the mint is built, proven and signed here and the fee-unpaid ' +
-        'transaction goes to the sponsor (sponsorSessionId, default the platform pool) like ' +
-        'sponsor_unbound_transaction; the seed never leaves this process. The factory has to be ' +
+        'transaction goes to the sponsor like sponsor_unbound_transaction; the seed never ' +
+        'leaves this process. The factory has to be ' +
         'on the sponsor\'s contract list and mint on its circuit list. SERVER (sessionId given): the ' +
         'server session is the issuer and mints through mintFactoryToken; needs that action in ' +
         'the grant. Either way the same name from another issuer is another token, and the ' +
@@ -1482,8 +1467,6 @@ export function registerTools(server: McpServer, client: NightgateClient, config
           .describe('Zswap coin public key of the receiving wallet (64 hex); default this wallet\'s own'),
         recipientEncryptionPublicKey: hex64('recipientEncryptionPublicKey').optional()
           .describe('The receiving wallet\'s encryption public key (64 hex); required with a recipient other than this wallet, local way'),
-        sponsorSessionId: z.string().uuid().optional()
-          .describe(`Local way: the session that pays the dust and submits; default the platform sponsor POOL id ${PLATFORM_POOL_SENTINEL}. Server way: an optional second session that pays`),
         sessionId: z.string().uuid().optional()
           .describe('Server way only: the wallet session that mints; it is the issuer'),
         idempotencyKey: z.string().optional().describe('Dedupes retries'),
@@ -1504,7 +1487,6 @@ export function registerTools(server: McpServer, client: NightgateClient, config
           recipientCoinPublicKey: recipient.toLowerCase(),
           sessionId: args.sessionId,
           idempotencyKey: args.idempotencyKey,
-          sponsorSessionId: args.sponsorSessionId,
         });
       }
       if (!config) throw new Error('local minting is not configured for this server instance');
@@ -1517,7 +1499,6 @@ export function registerTools(server: McpServer, client: NightgateClient, config
       });
       const job = await client.callAction('sponsorUnboundTransaction', {
         unboundTxB64: built.unboundTxB64,
-        sponsorSessionId: args.sponsorSessionId ?? PLATFORM_POOL_SENTINEL,
         idempotencyKey: args.idempotencyKey,
       }) as Record<string, unknown>;
       const { unboundTxB64: _tx, ...rest } = built;
