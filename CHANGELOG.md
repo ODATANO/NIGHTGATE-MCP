@@ -7,6 +7,26 @@ The README says which NIGHTGATE the current version needs.
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-10-13
+
+Needs NIGHTGATE 0.33.0 and `@odatano/nightgate-tx` 0.12.2.
+
+### Changed
+
+- `build_sponsorable_transaction` and the local `mint_token` read contract
+  state through the NIGHTGATE API (`createTxBuilder({ api })`); they dial no
+  indexer and no node. `NIGHTGATE_INDEXER_HTTP_URL` and `NIGHTGATE_INDEXER_WS_URL`
+  switch them back to a Midnight indexer.
+- The swap wallet syncs from `NIGHTGATE_INDEXER_HTTP_URL` and
+  `NIGHTGATE_INDEXER_WS_URL` only; without them the swap tools refuse with
+  the two names instead of dialing the public indexer.
+- `build_sponsorable_transaction` returns `txId` (sha256 of the bytes),
+  `characters` and `bytes` instead of the base64; the bytes stay in the server
+  process for one hour, `outFile` writes them to a path.
+- `sponsor_unbound_transaction` and `sponsor_finalized_transaction` take `txId`
+  or `file` (base64 text or raw bytes); the base64 argument remains for callers
+  without either. The result carries `sent` with characters, bytes and `txId`.
+
 ## [0.11.0] - 2026-10-12
 
 Needs NIGHTGATE 0.32.0.

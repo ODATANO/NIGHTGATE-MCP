@@ -9,7 +9,7 @@
  */
 import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { NightgateMcpConfig } from './config.js';
+import { builderChainOptions, type NightgateMcpConfig } from './config.js';
 import { txExport } from './tx-module.js';
 import { seedIdentity } from './builder.js';
 
@@ -50,28 +50,16 @@ async function loadFactoryModule(): Promise<any> {
   return factoryModule;
 }
 
-function defaults(network: string) {
-  return {
-    indexerHttpUrl: `https://indexer.${network}.midnight.network/api/v4/graphql`,
-    indexerWsUrl: `wss://indexer.${network}.midnight.network/api/v4/graphql/ws`,
-    nodeUrl: `wss://rpc.${network}.midnight.network/`,
-  };
-}
-
 /** One builder per process; the package resolves from this install, not the caller's cwd. */
 async function getFactoryBuilder(config: NightgateMcpConfig): Promise<any> {
   builder ??= (async () => {
-    const createTxBuilder = await txExport<(opts: Record<string, unknown>) => Promise<any>>('createTxBuilder', 'minting', '0.10.2');
-    const d = defaults(config.network);
+    const createTxBuilder = await txExport<(opts: Record<string, unknown>) => Promise<any>>('createTxBuilder', 'minting', '0.12.2');
     const opts: Record<string, unknown> = {
       seedHex: config.seedHex,
       networkId: config.network,
-      indexerHttpUrl: config.indexerHttpUrl ?? d.indexerHttpUrl,
-      indexerWsUrl: config.indexerWsUrl ?? d.indexerWsUrl,
-      nodeUrl: config.nodeUrl ?? d.nodeUrl,
+      ...builderChainOptions(config),
       package: FACTORY_PACKAGE,
       from: HERE,
-      walletSync: false,
     };
     if (config.proofServerUrl) {
       opts.provingMode = 'server';

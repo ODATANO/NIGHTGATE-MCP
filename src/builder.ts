@@ -5,14 +5,16 @@
  * or a proof server) and sign an AttestationVault call on THIS machine with
  * the seed from `NIGHTGATE_SEED_HEX`, so the key and the attestation secret
  * never travel; the result is the fee-unpaid transaction the sponsor tools
- * submit. The package is an OPTIONAL peer dependency (it carries the Midnight
- * SDK): the tool is always registered and reports how to install it when it
- * is missing.
+ * submit. Contract state comes from the NIGHTGATE API unless an indexer is
+ * configured. The package is an OPTIONAL peer dependency (it carries the
+ * Midnight SDK): the tool is always registered and reports how to install it
+ * when it is missing.
  */
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import type { NightgateMcpConfig } from './config.js';
+import { builderChainOptions, type NightgateMcpConfig } from './config.js';
 import { txExport } from './tx-module.js';
+import { holdBuilt, writeTxFile, type TxBytesInfo } from './built.js';
 
 /**
  * Call kinds this tool can prepare; one per attestation-vault helper.
@@ -65,12 +67,13 @@ export interface BuildInput {
   merkleProof?: Record<string, unknown>;
   /** Cross-root witness bundle { schema, openingA, openingB } for the two comparison calls. */
   docPair?: Record<string, unknown>;
+  /** Where to write the built bytes as base64, for a hand-over outside this process. */
+  outFile?: string;
 }
 
-export interface BuildOutput {
+export interface BuildOutput extends TxBytesInfo {
   channel: 'unbound' | 'bound';
-  unboundTxB64?: string;
-  finalizedTxB64?: string;
+  file?: string;
   attesterId: string;
   provingMode: string;
   serializedBytes: number;
@@ -108,7 +111,7 @@ async function loadModules(ref: BuildableArtifact = DEFAULT_ARTIFACT): Promise<T
       } catch (err) {
         modules.delete(ref);
         throw new Error(
-          `local building of '${ref}' needs @odatano/nightgate-tx >= 0.8.0 next to the MCP server ` +
+          `local building of '${ref}' needs @odatano/nightgate-tx >= 0.12.2 next to the MCP server ` +
           '(npm install @odatano/nightgate-tx): ' + (err instanceof Error ? err.message : String(err)),
         );
       }
@@ -116,14 +119,6 @@ async function loadModules(ref: BuildableArtifact = DEFAULT_ARTIFACT): Promise<T
     modules.set(ref, entry);
   }
   return entry;
-}
-
-function defaults(network: string) {
-  return {
-    indexerHttpUrl: `https://indexer.${network}.midnight.network/api/v4/graphql`,
-    indexerWsUrl: `wss://indexer.${network}.midnight.network/api/v4/graphql/ws`,
-    nodeUrl: `wss://rpc.${network}.midnight.network/`,
-  };
 }
 
 /**
@@ -141,7 +136,6 @@ async function getBuilder(config: NightgateMcpConfig, ref: BuildableArtifact = D
     entry = (async () => {
       const { createTxBuilder, Contract } = await loadModules(ref);
       const network = config.network;
-      const d = defaults(network);
       // An explicit zkConfigBaseUrl pins ONE lineage, so it only applies to
       // the default ref; anything else derives its own from the server.
       const zkBase = ref === DEFAULT_ARTIFACT && config.zkConfigBaseUrl
@@ -150,9 +144,7 @@ async function getBuilder(config: NightgateMcpConfig, ref: BuildableArtifact = D
       const opts: Record<string, unknown> = {
         seedHex: config.seedHex,
         networkId: network,
-        indexerHttpUrl: config.indexerHttpUrl ?? d.indexerHttpUrl,
-        indexerWsUrl: config.indexerWsUrl ?? d.indexerWsUrl,
-        nodeUrl: config.nodeUrl ?? d.nodeUrl,
+        ...builderChainOptions(config),
         zkConfigBaseUrl: zkBase,
         contractClass: Contract,
         contractName: ref,
@@ -268,15 +260,17 @@ export async function buildSponsorable(config: NightgateMcpConfig, input: BuildI
   const mods = await loadModules(ref);
   const call = prepareCall(mods, input, b.attestationSecret, String(b.attesterId));
   const built = await b.buildSponsorable({ contractAddress: input.contractAddress, call, bind: input.bind ? true : false });
+  const b64 = String(input.bind ? built.finalizedTxB64 : built.unboundTxB64);
+  if (input.outFile) await writeTxFile(input.outFile, b64);
   const out: BuildOutput = {
+    ...holdBuilt(b64),
     channel: input.bind ? 'bound' : 'unbound',
+    ...(input.outFile ? { file: input.outFile } : {}),
     attesterId: String(b.attesterId),
     provingMode: String(b.provingMode ?? (config.proofServerUrl ? 'server' : 'wasm')),
     serializedBytes: Number(built.serializedBytes ?? 0),
     buildMs: Date.now() - t0,
   };
-  if (input.bind) out.finalizedTxB64 = built.finalizedTxB64;
-  else out.unboundTxB64 = built.unboundTxB64;
   return out;
 }
 
@@ -319,7 +313,6 @@ export async function attesterIdentity(config: NightgateMcpConfig): Promise<{
   return {
     attesterId: String(b.attesterId),
     network: config.network,
-    // from @odatano/nightgate-tx 0.8.0 on
     ...(b.addresses?.shielded ? { shieldedAddress: String(b.addresses.shielded) } : {}),
     ...(b.shieldedKeys ? { coinPublicKey: String(b.shieldedKeys.coinPublicKey), encryptionPublicKey: String(b.shieldedKeys.encryptionPublicKey) } : {}),
   };

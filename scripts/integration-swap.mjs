@@ -93,6 +93,7 @@ const stateFile = join(dir, 'state', 'swap-wallet.state');
 const env = {
   ODATANO_ACCESS_URL: 'http://127.0.0.1:9', NIGHTGATE_SEED_HEX: '5'.repeat(128), NIGHTGATE_NETWORK: 'preprod',
   NIGHTGATE_SWAP_STATE_FILE: stateFile, NIGHTGATE_SWAP_MAX_INPUTS: '4',
+  NIGHTGATE_INDEXER_HTTP_URL: 'http://127.0.0.1:9/api/v4/graphql', NIGHTGATE_INDEXER_WS_URL: 'ws://127.0.0.1:9/api/v4/graphql/ws',
 };
 const connect = async (config) => {
   const server = buildServer(config);
@@ -122,7 +123,7 @@ try {
   if (w.value.maxInputs !== 4 || w.value.address !== wallet.address || w.value.pendingHalves.length !== 0) fail(`get_swap_wallet: ${w.text.slice(0, 300)}`);
   const opened = calls.created[0];
   if (opened.seedHex !== env.NIGHTGATE_SEED_HEX || opened.networkId !== 'preprod' || opened.maxInputs !== 4 || opened.walletState !== undefined
-    || !/indexer\.preprod\.midnight\.network/.test(opened.indexerHttpUrl) || opened.provingMode !== undefined) {
+    || opened.indexerHttpUrl !== env.NIGHTGATE_INDEXER_HTTP_URL || opened.indexerWsUrl !== env.NIGHTGATE_INDEXER_WS_URL || opened.provingMode !== undefined) {
     fail(`createSwapWallet input: ${JSON.stringify({ ...opened, seedHex: '…' })}`);
   }
   if ((await readFile(stateFile, 'utf8')) !== 'state-after-0-halves') fail('the wallet state was not written after the sync');
@@ -235,7 +236,11 @@ try {
   const refusedSeed = await noSeed.call('build_swap_offer', { give: { tokenType: A, amount: '1' }, want: { tokenType: B, amount: '1' } });
   if (!refusedSeed.isError || !/NIGHTGATE_SEED_HEX/.test(refusedSeed.text)) fail(`build_swap_offer without a seed: ${refusedSeed.text.slice(0, 300)}`);
   await noSeed.close();
-  console.log('OK: proof server from NIGHTGATE_PROOF_SERVER_URL, swaps need NIGHTGATE_SEED_HEX');
+  const noIndexer = await connect(loadConfig({ ...env, NIGHTGATE_INDEXER_WS_URL: '' }));
+  const refusedIndexer = await noIndexer.call('get_swap_wallet');
+  if (!refusedIndexer.isError || !/NIGHTGATE_INDEXER_HTTP_URL and NIGHTGATE_INDEXER_WS_URL/.test(refusedIndexer.text)) fail(`get_swap_wallet without an indexer: ${refusedIndexer.text.slice(0, 300)}`);
+  await noIndexer.close();
+  console.log('OK: proof server from NIGHTGATE_PROOF_SERVER_URL, swaps need NIGHTGATE_SEED_HEX and an indexer');
 } finally {
   await closeSwapWallet();
   await rm(dir, { recursive: true, force: true });

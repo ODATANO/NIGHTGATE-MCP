@@ -1,8 +1,8 @@
 /**
  * Shielded swaps, the local side: one wallet that holds the shielded coins of
  * `NIGHTGATE_SEED_HEX` builds swap halves and takes offers. It wraps the swap
- * wallet of `@odatano/nightgate-tx` (0.8.0 or later); the fee is the sponsor's,
- * so the wallet needs neither NIGHT nor dust.
+ * wallet of `@odatano/nightgate-tx`; the fee is the sponsor's, so the wallet
+ * needs neither NIGHT nor dust. Its coins sync from a configured Midnight indexer.
  */
 import { createHash } from 'node:crypto';
 import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
@@ -44,13 +44,6 @@ async function loadSwapModule(): Promise<TxSwapModule> {
     }
   })();
   return modulePromise;
-}
-
-function defaults(network: string) {
-  return {
-    indexerHttpUrl: `https://indexer.${network}.midnight.network/api/v4/graphql`,
-    indexerWsUrl: `wss://indexer.${network}.midnight.network/api/v4/graphql/ws`,
-  };
 }
 
 const termsOut = (terms: any): SwapTermsOut => ({
@@ -129,16 +122,19 @@ async function openWallet(config: NightgateMcpConfig): Promise<OpenWallet> {
   if (!config.seedHex) {
     throw new Error('swaps need NIGHTGATE_SEED_HEX in the MCP server environment; it is never a tool argument');
   }
+  const { indexerHttpUrl, indexerWsUrl } = config;
+  if (!indexerHttpUrl || !indexerWsUrl) {
+    throw new Error('swaps need NIGHTGATE_INDEXER_HTTP_URL and NIGHTGATE_INDEXER_WS_URL in the MCP server environment: a Midnight indexer the swap wallet syncs its coins from');
+  }
   open ??= (async (): Promise<OpenWallet> => {
     try {
       const { createSwapWallet } = await loadSwapModule();
-      const d = defaults(config.network);
       const walletState = await readState(config.swapStateFile);
       const wallet = await createSwapWallet({
         seedHex: config.seedHex,
         networkId: config.network,
-        indexerHttpUrl: config.indexerHttpUrl ?? d.indexerHttpUrl,
-        indexerWsUrl: config.indexerWsUrl ?? d.indexerWsUrl,
+        indexerHttpUrl,
+        indexerWsUrl,
         ...(config.nodeUrl ? { nodeUrl: config.nodeUrl } : {}),
         ...(config.proofServerUrl ? { provingMode: 'server', proofServerUrl: config.proofServerUrl } : {}),
         ...(config.swapMaxInputs ? { maxInputs: config.swapMaxInputs } : {}),

@@ -67,7 +67,7 @@ const built = await call('build_sponsorable_transaction', {
 console.log(`built locally in ${((Date.now() - t0) / 1000).toFixed(1)}s (${built.provingMode}, ${built.serializedBytes} bytes, ${built.channel})`);
 
 const t1 = Date.now();
-const { jobId, sessionId } = await call('sponsor_unbound_transaction', { unboundTxB64: built.unboundTxB64 });
+const { jobId, sessionId } = await call('sponsor_unbound_transaction', { txId: built.txId });
 let job;
 for (;;) {
   await new Promise(r => setTimeout(r, 3000));

@@ -37,6 +37,7 @@ export interface NightgateMcpConfig {
   seedHex?: string;
   /** Midnight network the builder targets; default preprod. */
   network: string;
+  /** A Midnight indexer and node for the builders to read the chain from. Without them the NIGHTGATE API is read. */
   indexerHttpUrl?: string;
   indexerWsUrl?: string;
   nodeUrl?: string;
@@ -93,4 +94,29 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): NightgateMcpCo
     swapStateFile: env.NIGHTGATE_SWAP_STATE_FILE || undefined,
     swapMaxInputs,
   };
+}
+
+/** The NIGHTGATE connection as the txbuilder's `api` option takes it: same host, same credentials. */
+export function apiConnectOptions(config: NightgateMcpConfig): Record<string, unknown> {
+  const agent = config.token?.startsWith('ngat_');
+  return {
+    baseUrl: config.baseUrl,
+    servicePath: config.servicePath,
+    timeoutMs: config.timeoutMs,
+    ...(agent ? { agentToken: config.token } : config.token ? { token: config.token } : {}),
+    ...(config.username && (agent || !config.token) ? { username: config.username, password: config.password } : {}),
+  };
+}
+
+/** Where a local builder reads contract state: the configured indexer and node, else the NIGHTGATE API. */
+export function builderChainOptions(config: NightgateMcpConfig): Record<string, unknown> {
+  if (config.indexerHttpUrl && config.indexerWsUrl) {
+    return {
+      indexerHttpUrl: config.indexerHttpUrl,
+      indexerWsUrl: config.indexerWsUrl,
+      nodeUrl: config.nodeUrl ?? `wss://rpc.${config.network}.midnight.network/`,
+      walletSync: false,
+    };
+  }
+  return { api: apiConnectOptions(config), walletSync: false };
 }

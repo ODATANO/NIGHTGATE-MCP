@@ -9,6 +9,7 @@ import {
 } from './swap.js';
 import { txExport } from './tx-module.js';
 import { buildMint } from './factory.js';
+import { resolveTxSource } from './built.js';
 
 const HEX64 = /^[0-9a-fA-F]{64}$/;
 const hex64 = (what: string) =>
@@ -42,6 +43,9 @@ const swapLeg = (what: string) => z.object({
 });
 const legOut = (leg: { tokenType: string; amount: string | number }) => ({ tokenType: leg.tokenType.toLowerCase(), amount: String(leg.amount) });
 /** A swap half as it is handed over: offer file text or base64 of the serialized transaction. */
+const TX_ID = z.string().regex(/^[0-9a-f]{64}$/, 'txId must be the 64 hex characters a build tool returned').optional();
+const TX_FILE = z.string().min(1).optional()
+  .describe('Path of a file holding the transaction, as base64 text or raw bytes (outFile of a build tool, or written by the txbuilder)');
 const swapHalf = (what: string) => z.string().min(16)
   .describe(`${what}: offer file text (swapoffer1...) or base64 of the serialized, proven transaction`);
 const SWAP_HINT = 'A swap settles two shielded tokens between two wallets without a contract: each side builds one half ' +
@@ -912,9 +916,10 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         'Build, prove and sign an AttestationVault call LOCALLY (caller half of cross-server fee ' +
         'sponsoring, @odatano/nightgate-tx txbuilder): the seed comes from the MCP server ' +
         'environment (NIGHTGATE_SEED_HEX), the attestation secret is derived from it, nothing ' +
-        'secret leaves this machine. Returns the fee-unpaid transaction as base64: UNBOUND by ' +
-        'default (hand it to sponsor_unbound_transaction, parallel channel) or bound with ' +
-        'bind:true (sponsor_finalized_transaction). The on-chain effect carries the attester id ' +
+        'secret leaves this machine. The fee-unpaid transaction stays in this process under the ' +
+        'returned txId (its sha256; characters and bytes alongside), or is written to outFile: ' +
+        'UNBOUND by default (hand the txId to sponsor_unbound_transaction, parallel channel) or ' +
+        'bound with bind:true (sponsor_finalized_transaction). The on-chain effect carries the attester id ' +
         'of THIS builder (returned). Proving takes 20-60 s in-process (the first call also ' +
         'fetches the prover keys from the NIGHTGATE /zk-config); NIGHTGATE_PROOF_SERVER_URL ' +
         'switches to a proof server. Needs @odatano/nightgate-tx installed next to the MCP ' +
@@ -950,6 +955,8 @@ export function registerTools(server: McpServer, client: NightgateClient, config
           .describe('false (default): unbound for sponsor_unbound_transaction; true: finalized for sponsor_finalized_transaction'),
         compiledArtifactRef: z.enum(BUILDABLE_ARTIFACTS).optional()
           .describe("Vault lineage to build against, defaults to 'attestation-vault'. Use 'attestation-vault-32' for a 32-slot vault: it has its own circuits, so the builder loads that contract class and fetches ITS prover keys from the server's /zk-config. The address must belong to the lineage named here"),
+        outFile: z.string().min(1).optional()
+          .describe('Also write the built bytes as base64 to this path, for a sponsor tool on another server (its file argument)'),
       },
     },
     run(async (args) => {
@@ -957,7 +964,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
       return buildSponsorable(config, {
         contractAddress: args.contractAddress, call: args.call, params: args.params, bind: args.bind === true,
         compiledArtifactRef: args.compiledArtifactRef,
-        merkleProof: args.merkleProof, docPair: args.docPair,
+        merkleProof: args.merkleProof, docPair: args.docPair, outFile: args.outFile,
       });
     }),
   );
@@ -994,17 +1001,22 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         'The server picks the wallet that pays. Poll get_job_status with the sessionId ' +
         'RETURNED by this call. ' + POLL_HINT,
       inputSchema: {
-        finalizedTxB64: z.string().min(1)
-          .describe('Base64 of the caller-finalized, fee-unpaid transaction (~7000 chars for a vault call)'),
+        txId: TX_ID.describe('txId returned by build_sponsorable_transaction (bind:true) on this server; the bytes never pass through the conversation'),
+        file: TX_FILE,
+        finalizedTxB64: z.string().min(1).optional()
+          .describe('Base64 of the caller-finalized, fee-unpaid transaction, only when neither txId nor file is available: long base64 copied through a model loses characters'),
         idempotencyKey: z.string().optional()
           .describe('Dedupes retries; the request is also fingerprinted by the transaction bytes'),
       },
     },
-    run(async (args) =>
-      client.callAction('sponsorFinalizedTransaction', {
-        finalizedTxB64: args.finalizedTxB64,
+    run(async (args) => {
+      const { b64, sent } = await resolveTxSource({ txId: args.txId, file: args.file, b64: args.finalizedTxB64 }, 'finalizedTxB64');
+      const job = await client.callAction('sponsorFinalizedTransaction', {
+        finalizedTxB64: b64,
         idempotencyKey: args.idempotencyKey,
-      })),
+      }) as Record<string, unknown>;
+      return { ...job, sent };
+    }),
   );
 
   server.registerTool(
@@ -1025,17 +1037,22 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         'contract state and sponsor again (never resubmit the same bytes). Poll get_job_status ' +
         'with the sessionId RETURNED by this call. ' + POLL_HINT,
       inputSchema: {
-        unboundTxB64: z.string().min(1)
-          .describe('Base64 of the caller-built, proven and signed UNBOUND transaction (bind:false output)'),
+        txId: TX_ID.describe('txId returned by build_sponsorable_transaction on this server; the bytes never pass through the conversation'),
+        file: TX_FILE,
+        unboundTxB64: z.string().min(1).optional()
+          .describe('Base64 of the caller-built, proven and signed UNBOUND transaction, only when neither txId nor file is available: long base64 copied through a model loses characters'),
         idempotencyKey: z.string().optional()
           .describe('Dedupes retries of the SAME bytes; a rebuilt transaction is a new key'),
       },
     },
-    run(async (args) =>
-      client.callAction('sponsorUnboundTransaction', {
-        unboundTxB64: args.unboundTxB64,
+    run(async (args) => {
+      const { b64, sent } = await resolveTxSource({ txId: args.txId, file: args.file, b64: args.unboundTxB64 }, 'unboundTxB64');
+      const job = await client.callAction('sponsorUnboundTransaction', {
+        unboundTxB64: b64,
         idempotencyKey: args.idempotencyKey,
-      })),
+      }) as Record<string, unknown>;
+      return { ...job, sent };
+    }),
   );
 
   server.registerTool(
