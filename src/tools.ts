@@ -1523,6 +1523,20 @@ export function registerTools(server: McpServer, client: NightgateClient, config
     }),
   );
   server.registerTool(
+    'get_grant_usage',
+    {
+      description:
+        'What this key did and what it may still do: jobs by kind and status, landed, failed, dustPaid, ' +
+        'and limits { jobsPerHour, jobsPerDay: { max, used, resetsAt }, classes: [{ name, windowSeconds, max, remaining }] }. ' +
+        'Read it before a burst and after a 429 (the error carries retryAfterSeconds). Default window: the last 30 days.',
+      inputSchema: {
+        since: z.string().datetime().optional().describe('ISO timestamp; start of the usage window'),
+        until: z.string().datetime().optional().describe('ISO timestamp; end of the usage window'),
+      },
+    },
+    run(async (args) => client.callFunction('getGrantUsage', { grantId: null, since: args.since ?? null, until: args.until ?? null })),
+  );
+  server.registerTool(
     'get_job_status',
     {
       description:

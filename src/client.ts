@@ -6,7 +6,7 @@ export class NightgateApiError extends Error {
     public readonly status: number,
     public readonly code: string | undefined,
     message: string,
-    /** Extra fields of a gateway error body (unitsLeft, price, topup, products, validUntil, retryAfterSeconds). */
+    /** `retryAfterSeconds` from `Retry-After`, plus the extra fields of a gateway error body (unitsLeft, price, topup, products, validUntil). */
     public readonly detail?: Record<string, unknown>,
   ) {
     super(message);
@@ -31,7 +31,8 @@ export function apiError(status: number, payload: unknown, headers: Headers, fal
     return new NightgateApiError(status, undefined, err, Object.keys(detail).length ? detail : undefined);
   }
   const e = (err ?? {}) as { code?: string; message?: string };
-  return new NightgateApiError(status, e.code, e.message ?? fallback);
+  const retry = headers.get('retry-after');
+  return new NightgateApiError(status, e.code, e.message ?? fallback, retry ? { retryAfterSeconds: Number(retry) } : undefined);
 }
 
 /**

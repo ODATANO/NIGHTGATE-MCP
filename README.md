@@ -8,7 +8,7 @@
 # @odatano/nightgate-mcp
 
 [![npm](https://img.shields.io/npm/v/@odatano/nightgate-mcp)](https://www.npmjs.com/package/@odatano/nightgate-mcp)
-[![NIGHTGATE](https://img.shields.io/badge/NIGHTGATE-%3E%3D%200.33.0-4b0082)](https://www.npmjs.com/package/@odatano/nightgate)
+[![NIGHTGATE](https://img.shields.io/badge/NIGHTGATE-%3E%3D%200.34.0-4b0082)](https://www.npmjs.com/package/@odatano/nightgate)
 [![MCP](https://img.shields.io/badge/MCP-server-2ea44f)](https://modelcontextprotocol.io/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-yellow)](LICENSE)
 
@@ -50,7 +50,7 @@ halves, one sponsor). Errors carry the server's HTTP status and `code`.
 ## Configuration
 
 [docs/configuration.md](docs/configuration.md): every variable, an own
-NIGHTGATE instance, version requirements. Needs NIGHTGATE >= 0.33.0, which the
+NIGHTGATE instance, version requirements. Needs NIGHTGATE >= 0.34.0, which the
 hosted gateway runs.
 
 ## Development

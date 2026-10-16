@@ -7,6 +7,20 @@ The README says which NIGHTGATE the current version needs.
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-10-15
+
+Needs NIGHTGATE 0.34.0 and `@odatano/nightgate-tx` 0.12.2.
+
+### Added
+
+- `get_grant_usage`: the key's jobs and its limits, the hour and day budgets
+  and the rate classes with what is left.
+
+### Changed
+
+- A 429 from NIGHTGATE carries `retryAfterSeconds` from `Retry-After`, as a
+  gateway 429 did already.
+
 ## [0.12.0] - 2026-10-13
 
 Needs NIGHTGATE 0.33.0 and `@odatano/nightgate-tx` 0.12.2.
