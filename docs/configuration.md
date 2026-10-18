@@ -18,8 +18,10 @@ NIGHTGATE instance, and which versions it needs.
 | `NIGHTGATE_SWAP_MAX_INPUTS` | `4` | Most coins one swap half spends; the sponsor's limit applies |
 | `NIGHTGATE_TIMEOUT_MS` | `30000` | Per-request timeout |
 
-Also: `NIGHTGATE_NODE_URL`, `NIGHTGATE_SERVICE_PATH`, `NIGHTGATE_INDEXER_SERVICE_PATH`,
-`ODATANO_ANALYTICS_URL`, `NIGHTGATE_ZK_CONFIG_BASE_URL`, `NIGHTGATE_ZK_CACHE_DIR`.
+Also: `NIGHTGATE_NODE_URL`, `NIGHTGATE_SERVICE_PATH` (`/odata/v4/midnight`),
+`NIGHTGATE_INDEXER_SERVICE_PATH` (`/odata/v4/midnight-indexer`; a server below
+0.35.0 needs `/api/v1/nightgate` and `/api/v1/indexer`), `ODATANO_ANALYTICS_URL`,
+`NIGHTGATE_ZK_CONFIG_BASE_URL`, `NIGHTGATE_ZK_CACHE_DIR`.
 
 ## Own instance
 
@@ -34,8 +36,8 @@ Then `ODATANO_ACCESS_URL=http://localhost:4004`, `ODATANO_ACCESS_USER=nightgate`
 
 ## Compatibility
 
-NIGHTGATE >= 0.34.0, which the hosted gateway runs. Local building needs
-`@odatano/nightgate-tx` >= 0.12.2 next to the server, local minting also
+NIGHTGATE >= 0.35.0, which the hosted gateway runs. Local building needs
+`@odatano/nightgate-tx` >= 0.14.0 next to the server, local minting also
 `@odatano/contract-token-factory`. What an older server lacks per version:
 [CHANGELOG](CHANGELOG.md).
 

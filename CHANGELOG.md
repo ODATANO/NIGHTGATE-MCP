@@ -7,6 +7,17 @@ The README says which NIGHTGATE the current version needs.
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-10-18
+
+Needs NIGHTGATE 0.35.0 and `@odatano/nightgate-tx` 0.14.0 (the gateway serves both spellings).
+
+### Changed
+
+- The tools call NIGHTGATE under `/odata/v4/midnight` and
+  `/odata/v4/midnight-indexer`. Against a server below 0.35.0 set
+  `NIGHTGATE_SERVICE_PATH=/api/v1/nightgate` and
+  `NIGHTGATE_INDEXER_SERVICE_PATH=/api/v1/indexer`.
+
 ## [0.13.0] - 2026-10-15
 
 Needs NIGHTGATE 0.34.0 and `@odatano/nightgate-tx` 0.12.2.

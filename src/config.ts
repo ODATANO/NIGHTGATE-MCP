@@ -79,8 +79,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): NightgateMcpCo
     token: env.ODATANO_ACCESS_KEY || undefined,
     username: env.ODATANO_ACCESS_USER || undefined,
     password: env.ODATANO_ACCESS_PASSWORD || undefined,
-    servicePath: env.NIGHTGATE_SERVICE_PATH ?? '/api/v1/nightgate',
-    indexerServicePath: env.NIGHTGATE_INDEXER_SERVICE_PATH ?? '/api/v1/indexer',
+    servicePath: env.NIGHTGATE_SERVICE_PATH ?? '/odata/v4/midnight',
+    indexerServicePath: env.NIGHTGATE_INDEXER_SERVICE_PATH ?? '/odata/v4/midnight-indexer',
     analyticsUrl,
     timeoutMs,
     seedHex,
@@ -102,6 +102,7 @@ export function apiConnectOptions(config: NightgateMcpConfig): Record<string, un
   return {
     baseUrl: config.baseUrl,
     servicePath: config.servicePath,
+    indexerServicePath: config.indexerServicePath,
     timeoutMs: config.timeoutMs,
     ...(agent ? { agentToken: config.token } : config.token ? { token: config.token } : {}),
     ...(config.username && (agent || !config.token) ? { username: config.username, password: config.password } : {}),
