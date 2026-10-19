@@ -118,7 +118,7 @@ export class NightgateClient {
 
   // ---- ODATANO ASTRA: analytics over the same index, same host, same key ----
 
-  /** Base URL of ODATANO ASTRA: the gateway's `/odata/v4/astra` unless ODATANO_ANALYTICS_URL says otherwise. */
+  /** Base URL of ODATANO ASTRA: the gateway's `/odata/v4/analytics` unless ODATANO_ANALYTICS_URL says otherwise. */
   analyticsUrl(): string {
     return this.config.analyticsUrl;
   }

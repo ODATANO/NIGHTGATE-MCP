@@ -5,7 +5,7 @@ import { wrapHandler } from './tools.js';
 
 /*
  * Analytics over the Midnight index, served by ODATANO ASTRA through the same
- * gateway and the same key (`/odata/v4/astra`, 1 unit per read). Every tool
+ * gateway and the same key (`/odata/v4/analytics`, 1 unit per read). Every tool
  * pins `chain eq 'midnight'`; the Cardano server (@odatano/core-mcp) carries
  * the same tools for its chain, and `analytics_compare` puts both side by
  * side from either. Registered only when the gateway serves ASTRA.

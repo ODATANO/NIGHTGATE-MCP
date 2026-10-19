@@ -24,7 +24,7 @@ export interface NightgateMcpConfig {
   /** OData service path of the indexer service (the anonymous status reads). */
   indexerServicePath: string;
   /**
-   * Absolute URL of ODATANO ASTRA, the analytics service. Default `<baseUrl>/odata/v4/astra`,
+   * Absolute URL of ODATANO ASTRA, the analytics service. Default `<baseUrl>/odata/v4/analytics`,
    * which is where the gateway serves it; an own deployment sets ODATANO_ANALYTICS_URL to its
    * ASTRA instance (its own app on its own port), or leaves it and gets no analytics tools.
    */
@@ -73,7 +73,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): NightgateMcpCo
   if (swapMaxInputs !== undefined && (!Number.isInteger(swapMaxInputs) || swapMaxInputs < 1)) {
     throw new Error(`Invalid NIGHTGATE_SWAP_MAX_INPUTS: ${env.NIGHTGATE_SWAP_MAX_INPUTS} (a positive integer)`);
   }
-  const analyticsUrl = (env.ODATANO_ANALYTICS_URL || `${baseUrl}/odata/v4/astra`).replace(/\/+$/, '');
+  const analyticsUrl = (env.ODATANO_ANALYTICS_URL || `${baseUrl}/odata/v4/analytics`).replace(/\/+$/, '');
   return {
     baseUrl,
     token: env.ODATANO_ACCESS_KEY || undefined,

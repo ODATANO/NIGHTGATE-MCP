@@ -7,6 +7,16 @@ The README says which NIGHTGATE the current version needs.
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-10-19
+
+Needs NIGHTGATE 0.35.0 and `@odatano/nightgate-tx` 0.14.0; analytics under `/odata/v4/analytics` (the gateway serves both names).
+
+### Changed
+
+- **The analytics URL defaults to `<ODATANO_ACCESS_URL>/odata/v4/analytics`**
+  instead of `…/odata/v4/astra`. An ASTRA instance that still serves
+  `/odata/v4/astra` needs `ODATANO_ANALYTICS_URL` set to that path.
+
 ## [0.14.0] - 2026-10-18
 
 Needs NIGHTGATE 0.35.0 and `@odatano/nightgate-tx` 0.14.0 (the gateway serves both spellings).
