@@ -7,6 +7,18 @@ The README says which NIGHTGATE the current version needs.
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-10-24
+
+Needs NIGHTGATE 0.36.0 and `@odatano/nightgate-tx` 0.14.0.
+
+### Changed
+
+- **The proof tools send typed parameters.** `siblings`, `dirs`, `setSiblings`,
+  `setDirs`, `allowedValues`, `claims`, `schema`, `openingA`, `openingB`,
+  `document` and `proofFields` go to NIGHTGATE as arrays and objects; the
+  `*Json` string parameters of NIGHTGATE 0.35 and below are not sent anymore.
+  `post_swap_offer` sends `tags` as an array. Tool inputs are unchanged.
+
 ## [0.15.0] - 2026-10-19
 
 Needs NIGHTGATE 0.35.0 and `@odatano/nightgate-tx` 0.14.0; analytics under `/odata/v4/analytics` (the gateway serves both names).

@@ -36,7 +36,7 @@ Then `ODATANO_ACCESS_URL=http://localhost:4004`, `ODATANO_ACCESS_USER=nightgate`
 
 ## Compatibility
 
-NIGHTGATE >= 0.35.0, which the hosted gateway runs. Local building needs
+NIGHTGATE >= 0.36.0, which the hosted gateway runs. Local building needs
 `@odatano/nightgate-tx` >= 0.14.0 next to the server, local minting also
 `@odatano/contract-token-factory`. What an older server lacks per version:
 [CHANGELOG](CHANGELOG.md).
