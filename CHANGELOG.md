@@ -7,6 +7,16 @@ The README says which NIGHTGATE the current version needs.
 
 ## [Unreleased]
 
+## [0.17.1] - 2026-10-25
+
+Needs NIGHTGATE 0.36.0; `get_job_status` waits on the server from 0.37.0.
+
+### Changed
+
+- The errors for a missing `NIGHTGATE_SEED_HEX` name its format: 128 hex
+  characters, a 64-byte BIP39 seed. Same wording in
+  [docs/configuration.md](docs/configuration.md).
+
 ## [0.17.0] - 2026-10-25
 
 Needs NIGHTGATE 0.36.0; `get_job_status` waits on the server from 0.37.0.

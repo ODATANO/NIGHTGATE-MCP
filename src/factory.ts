@@ -74,7 +74,7 @@ async function getFactoryBuilder(config: NightgateMcpConfig): Promise<any> {
 /** Build, prove and sign a mint locally; unbound, for sponsor_unbound_transaction. */
 export async function buildMint(config: NightgateMcpConfig, input: MintInput): Promise<MintBuild> {
   if (!config.seedHex) {
-    throw new Error('minting needs NIGHTGATE_SEED_HEX (128 hex) in the MCP server environment: the seed is the issuer');
+    throw new Error('minting needs NIGHTGATE_SEED_HEX (128 hex characters, a 64-byte BIP39 seed) in the MCP server environment: the seed is the issuer');
   }
   const t0 = Date.now();
   const self = await seedIdentity(config);

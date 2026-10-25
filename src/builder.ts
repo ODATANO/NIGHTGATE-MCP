@@ -129,7 +129,7 @@ async function loadModules(ref: BuildableArtifact = DEFAULT_ARTIFACT): Promise<T
  */
 async function getBuilder(config: NightgateMcpConfig, ref: BuildableArtifact = DEFAULT_ARTIFACT): Promise<any> {
   if (!config.seedHex) {
-    throw new Error('local building needs NIGHTGATE_SEED_HEX (128 hex) in the MCP server environment; it is never a tool argument');
+    throw new Error('local building needs NIGHTGATE_SEED_HEX (128 hex characters, a 64-byte BIP39 seed) in the MCP server environment; it is never a tool argument');
   }
   let entry = builders.get(ref);
   if (!entry) {
@@ -285,7 +285,7 @@ export interface SeedIdentity {
 
 /** The public identity of the seed, a pure derivation: no builder, no indexer, no zk assets. */
 export async function seedIdentity(config: NightgateMcpConfig): Promise<SeedIdentity> {
-  if (!config.seedHex) throw new Error('NIGHTGATE_SEED_HEX (128 hex) is not set in the MCP server environment');
+  if (!config.seedHex) throw new Error('NIGHTGATE_SEED_HEX (128 hex characters, a 64-byte BIP39 seed) is not set in the MCP server environment');
   const key = `${config.network}:${config.seedHex.toLowerCase()}`;
   let entry = identities.get(key);
   if (!entry) {

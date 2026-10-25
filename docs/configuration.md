@@ -10,7 +10,7 @@ NIGHTGATE instance, and which versions it needs.
 | `ODATANO_ACCESS_KEY` | unset | `oda_…` key, or an `ngat_…` agent grant on a direct instance |
 | `ODATANO_ACCESS_URL` | `https://api.preprod.odatano.dev` | Gateway or a direct NIGHTGATE host |
 | `ODATANO_ACCESS_USER` / `_PASSWORD` | unset | Basic auth of a direct instance |
-| `NIGHTGATE_SEED_HEX` | unset | Seed (128 hex) for local building and swaps; never a tool argument |
+| `NIGHTGATE_SEED_HEX` | unset | Seed for local building and swaps: 128 hex characters, a 64-byte BIP39 seed; never a tool argument |
 | `NIGHTGATE_NETWORK` | `preprod` | Network of the local builder |
 | `NIGHTGATE_INDEXER_HTTP_URL` / `_WS_URL` | unset | A Midnight indexer; the swap wallet syncs from it, the builders then read it instead of the API |
 | `NIGHTGATE_PROOF_SERVER_URL` | unset | Prove on a proof server instead of in-process |
