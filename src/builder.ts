@@ -51,7 +51,7 @@ export type BuildableCall = (typeof BUILDABLE_CALLS)[number];
  */
 export const BUILDABLE_ARTIFACTS = ['attestation-vault', 'attestation-vault-32'] as const;
 export type BuildableArtifact = (typeof BUILDABLE_ARTIFACTS)[number];
-export const DEFAULT_ARTIFACT: BuildableArtifact = 'attestation-vault';
+export const DEFAULT_ARTIFACT: BuildableArtifact = 'attestation-vault-32';
 
 export interface BuildInput {
   contractAddress: string;
@@ -180,7 +180,7 @@ function hexParam(params: Record<string, string | number>, key: string): string 
 function prepareCall(mods: TxModules, input: BuildInput, attestationSecret: Uint8Array, ownAttesterId: string): unknown {
   const { calls } = mods;
   const p = input.params;
-  const slotWidth = input.compiledArtifactRef === 'attestation-vault-32' ? 32 : 16;
+  const slotWidth = (input.compiledArtifactRef ?? DEFAULT_ARTIFACT) === 'attestation-vault-32' ? 32 : 16;
   const recordKeyOf = (keyName: string, payloadName: string, attesterName: string): string => {
     if (typeof p[keyName] === 'string') return hexParam(p, keyName);
     const attester = typeof p[attesterName] === 'string' ? hexParam(p, attesterName) : ownAttesterId;

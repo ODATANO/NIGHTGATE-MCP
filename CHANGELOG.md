@@ -7,6 +7,23 @@ The README says which NIGHTGATE the current version needs.
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-10-25
+
+Needs NIGHTGATE 0.36.0; `get_job_status` waits on the server from 0.37.0.
+
+### Changed
+
+- **`get_job_status` waits instead of polling.** It passes `waitMs` (default
+  20000, at most 25000) and the server holds the call until the job settles;
+  a server without `waitMs` is asked again without it. Tool descriptions say
+  call instead of poll.
+- **Explorer hash.** The descriptions name `transactionHash`, the hash
+  explorers show, next to the ledger identifier `txHash` / `transactionId`.
+- **Default vault lineage `attestation-vault-32`**, the lineage of the hosted
+  sandbox vaults: the local builder, its prover keys and every tool that
+  sends `compiledArtifactRef` use it when none is given. A 16-slot vault needs
+  `compiledArtifactRef: 'attestation-vault'`.
+
 ## [0.16.0] - 2026-10-24
 
 Needs NIGHTGATE 0.36.0 and `@odatano/nightgate-tx` 0.14.0.

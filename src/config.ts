@@ -41,7 +41,7 @@ export interface NightgateMcpConfig {
   indexerHttpUrl?: string;
   indexerWsUrl?: string;
   nodeUrl?: string;
-  /** Where the prover keys come from; default `<baseUrl>/zk-config/attestation-vault`. */
+  /** Where the prover keys of the default lineage come from; default `<baseUrl>/zk-config/attestation-vault-32`. */
   zkConfigBaseUrl?: string;
   /** Disk cache for prover keys; default `<tmp>/nightgate-mcp-zk`. */
   zkCacheDir?: string;

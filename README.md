@@ -50,8 +50,8 @@ halves, one sponsor). Errors carry the server's HTTP status and `code`.
 ## Configuration
 
 [docs/configuration.md](docs/configuration.md): every variable, an own
-NIGHTGATE instance, version requirements. Needs NIGHTGATE >= 0.36.0, which the
-hosted gateway runs.
+NIGHTGATE instance, version requirements. Needs NIGHTGATE >= 0.36.0; from 0.37.0,
+which the hosted gateway runs, `get_job_status` waits on the server.
 
 ## Development
 

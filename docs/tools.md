@@ -1,9 +1,11 @@
 # Tools of @odatano/nightgate-mcp
 
 Every tool, what it does, and the two flows that chain several of them. Async
-tools return `{ jobId, status }`; `get_job_status` polls. The server reads
-the chain through the ODATANO API; only the swap wallet syncs from a Midnight
-indexer.
+tools return `{ jobId, status }`; `get_job_status` waits on the server until the
+job settles (`waitMs`, default 20 s). The server reads the chain through the
+ODATANO API; only the swap wallet syncs from a Midnight indexer. Vault tools
+default to `attestation-vault-32`, the lineage of the hosted sandbox vaults;
+pass `compiledArtifactRef: 'attestation-vault'` for a 16-slot vault.
 
 ## All tools
 
@@ -26,7 +28,7 @@ indexer.
 | `mint_token` | Mint a shielded token with a name of your own on a token factory: built here with the seed as issuer and sponsored, or by a server session (async) |
 | `grant_disclosure_to_holders`, `revoke_holder_disclosure`, `claim_disclosure`, `holder_claim_key` | Disclose a document to the holders of a token; read it with the secret behind a registered claim key |
 | `derive_token_type` | Token type a minting contract produces |
-| `get_job_status` | Poll an async job; batches report `chainSegments`, swaps `swap` |
+| `get_job_status` | Waits for an async job; `transactionHash` for explorers, batches report `chainSegments`, swaps `swap` |
 | `get_grant_usage` | What the key did and what it may still do: hour and day budgets, rate classes with what is left |
 | `analytics_*` | Midnight aggregates via ODATANO ASTRA, when the host serves it |
 

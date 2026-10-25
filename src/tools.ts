@@ -2,7 +2,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { int64, raw, NightgateApiError, NightgateClient } from './client.js';
 import type { NightgateMcpConfig } from './config.js';
-import { BUILDABLE_CALLS, BUILDABLE_ARTIFACTS, buildSponsorable, attesterIdentity, seedIdentity } from './builder.js';
+import { BUILDABLE_CALLS, BUILDABLE_ARTIFACTS, DEFAULT_ARTIFACT, buildSponsorable, attesterIdentity, seedIdentity } from './builder.js';
 import {
   buildOffer, postedOfferIds, readOffer, revertHalf, sameOffer, settleBoardRows, settleHalfJob, swapWalletInfo, takenHalves,
   takeOffer, trackHalfJob, trackPostedHalf,
@@ -31,7 +31,12 @@ const setSiblings = z.array(hex64('setSibling')).length(6)
 const setDirs = z.array(z.boolean()).length(6)
   .describe('Exactly 6 booleans; true means the current node is the LEFT child');
 
-const POLL_HINT = 'Async: returns { jobId, status } immediately; poll get_job_status until succeeded or failed.';
+const POLL_HINT = 'Async: returns { jobId, status } immediately; call get_job_status, which waits on the server until the job settles.';
+
+/** How long one get_job_status call lets the server wait for the job to settle, in ms. */
+const JOB_WAIT_MS = 20_000;
+// Off for this process once a server below NIGHTGATE 0.37 refuses getJobStatus' waitMs.
+let jobWait = true;
 
 /** One side of a swap: a raw token type and an amount in atoms. */
 const swapLeg = (what: string) => z.object({
@@ -220,7 +225,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
           .describe('Optional anchored schema id to check; the result reports schemaOk, so an examiner can pin the canonical field list'),
         network: z.enum(['preview', 'preprod', 'mainnet']).optional()
           .describe('Read from another network public indexer instead of the configured one'),
-        compiledArtifactRef: z.string().optional().describe("Contract artifact ref, defaults to 'attestation-vault'"),
+        compiledArtifactRef: z.string().optional().describe("Contract artifact ref, defaults to 'attestation-vault-32'; 'attestation-vault' for a 16-slot vault"),
       },
     },
     run(async (args) => {
@@ -234,7 +239,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         documentId: args.documentId,
         contentRoot: args.contentRoot,
         schemaId: args.schemaId,
-        compiledArtifactRef: args.compiledArtifactRef,
+        compiledArtifactRef: args.compiledArtifactRef ?? DEFAULT_ARTIFACT,
         network: args.network,
       });
     }),
@@ -275,7 +280,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
           .describe('documentDiff only: the k that was proven'),
         network: z.enum(['preview', 'preprod', 'mainnet']).optional()
           .describe('Read from another network public indexer instead of the configured one'),
-        compiledArtifactRef: z.string().optional().describe("Contract artifact ref, defaults to 'attestation-vault'"),
+        compiledArtifactRef: z.string().optional().describe("Contract artifact ref, defaults to 'attestation-vault-32'; 'attestation-vault' for a 16-slot vault"),
       },
     },
     run(async (args) => {
@@ -307,7 +312,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         payloadHashB: args.payloadHashB,
         allowedMask: args.allowedMask,
         k: args.k,
-        compiledArtifactRef: args.compiledArtifactRef,
+        compiledArtifactRef: args.compiledArtifactRef ?? DEFAULT_ARTIFACT,
         network: args.network,
       });
     }),
@@ -341,7 +346,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         documentId: z.string().uuid().describe('Documents row id'),
         providedSha256: hex64('providedSha256').describe('sha256 of the document to check (64 hex)'),
         contractAddress: z.string().optional().describe('Optional vault address, enables the crawler-free fallback'),
-        compiledArtifactRef: z.string().optional().describe("Contract artifact ref, defaults to 'attestation-vault'"),
+        compiledArtifactRef: z.string().optional().describe("Contract artifact ref, defaults to 'attestation-vault-32'; 'attestation-vault' for a 16-slot vault"),
       },
     },
     run(async (args) =>
@@ -349,7 +354,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         documentId: args.documentId,
         providedSha256: args.providedSha256,
         contractAddress: args.contractAddress,
-        compiledArtifactRef: args.compiledArtifactRef,
+        compiledArtifactRef: args.compiledArtifactRef ?? DEFAULT_ARTIFACT,
       })),
   );
 
@@ -385,7 +390,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         })).min(1).max(MAX_SLOT_WIDTH).describe('ORDERED list of fields to make provable (leaf index = position). Up to 16 on the default vault, up to 32 with compiledArtifactRef attestation-vault-32'),
         saltSeed: hex64('saltSeed').optional()
           .describe('Reuse a stored salt seed to reproduce an already-anchored root; omit for a fresh document (random seed)'),
-        compiledArtifactRef: z.string().optional().describe("Contract artifact ref, defaults to 'attestation-vault'"),
+        compiledArtifactRef: z.string().optional().describe("Contract artifact ref, defaults to 'attestation-vault-32'; 'attestation-vault' for a 16-slot vault"),
       },
     },
     run(async (args) =>
@@ -393,7 +398,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         document: args.document,
         proofFields: args.proofFields,
         saltSeed: args.saltSeed,
-        compiledArtifactRef: args.compiledArtifactRef,
+        compiledArtifactRef: args.compiledArtifactRef ?? DEFAULT_ARTIFACT,
       })),
   );
 
@@ -415,7 +420,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         policyHash: hex64('policyHash').optional().describe('Optional commitment to the governing policy (64 hex)'),
         producedAt: z.string().datetime().optional().describe('Optional ISO-8601 production time, defaults to now'),
         storageRef: z.string().optional().describe('Where output/envelope live, defaults to agent-output://<agentId>'),
-        compiledArtifactRef: z.string().optional().describe("Contract artifact ref, defaults to 'attestation-vault'"),
+        compiledArtifactRef: z.string().optional().describe("Contract artifact ref, defaults to 'attestation-vault-32'; 'attestation-vault' for a 16-slot vault"),
         idempotencyKey: z.string().optional().describe('Dedupes retries'),
         sponsorSessionId: z.string().uuid().optional().describe('Optional second session that pays the dust fee'),
       },
@@ -431,7 +436,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         storageRef: args.storageRef,
         sessionId: args.sessionId,
         contractAddress: args.contractAddress,
-        compiledArtifactRef: args.compiledArtifactRef,
+        compiledArtifactRef: args.compiledArtifactRef ?? DEFAULT_ARTIFACT,
         idempotencyKey: args.idempotencyKey,
         sponsorSessionId: args.sponsorSessionId,
       })),
@@ -455,7 +460,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         contentType: z.string().optional().describe('MIME type, informational'),
         size: z.number().int().nonnegative().optional().describe('Content size in bytes, informational'),
         metadata: z.record(z.unknown()).optional().describe('Public metadata object; its hash is anchored alongside'),
-        compiledArtifactRef: z.string().optional().describe("Contract artifact ref, defaults to 'attestation-vault'"),
+        compiledArtifactRef: z.string().optional().describe("Contract artifact ref, defaults to 'attestation-vault-32'; 'attestation-vault' for a 16-slot vault"),
         idempotencyKey: z.string().optional().describe('Dedupes retries of the same anchor request'),
         sponsorSessionId: z.string().uuid().optional().describe('Optional second session that pays the dust fee'),
       },
@@ -469,7 +474,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         metadata: args.metadata === undefined ? undefined : JSON.stringify(args.metadata),
         sessionId: args.sessionId,
         contractAddress: args.contractAddress,
-        compiledArtifactRef: args.compiledArtifactRef,
+        compiledArtifactRef: args.compiledArtifactRef ?? DEFAULT_ARTIFACT,
         idempotencyKey: args.idempotencyKey,
         sponsorSessionId: args.sponsorSessionId,
       })),
@@ -502,7 +507,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         contentRoot: hex64('contentRoot').optional().describe('Optional Merkle root (64 hex) to anchor first'),
         schemaId: hex64('schemaId').optional().describe('Schema id of the field list, required whenever contentRoot is supplied'),
         unit: z.string().optional().describe('Informational unit, e.g. kWh'),
-        compiledArtifactRef: z.string().optional().describe("Contract artifact ref, defaults to 'attestation-vault'"),
+        compiledArtifactRef: z.string().optional().describe("Contract artifact ref, defaults to 'attestation-vault-32'; 'attestation-vault' for a 16-slot vault"),
         idempotencyKey: z.string().optional().describe('Dedupes retries'),
         sponsorSessionId: z.string().uuid().optional().describe('Optional second session that pays the dust fee'),
       },
@@ -523,7 +528,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         unit: args.unit,
         sessionId: args.sessionId,
         contractAddress: args.contractAddress,
-        compiledArtifactRef: args.compiledArtifactRef,
+        compiledArtifactRef: args.compiledArtifactRef ?? DEFAULT_ARTIFACT,
         idempotencyKey: args.idempotencyKey,
         sponsorSessionId: args.sponsorSessionId,
       })),
@@ -546,7 +551,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
           .describe('Optional member string to get the inclusion path for (pass this OR valueDigest)'),
         valueDigest: hex64('valueDigest').optional()
           .describe('Optional member digest (64 hex) instead of the raw value'),
-        compiledArtifactRef: z.string().optional().describe("Contract artifact ref, defaults to 'attestation-vault'"),
+        compiledArtifactRef: z.string().optional().describe("Contract artifact ref, defaults to 'attestation-vault-32'; 'attestation-vault' for a 16-slot vault"),
       },
     },
     run(async (args) => {
@@ -557,7 +562,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         allowedValues: args.allowedValues,
         value: args.value,
         valueDigest: args.valueDigest,
-        compiledArtifactRef: args.compiledArtifactRef,
+        compiledArtifactRef: args.compiledArtifactRef ?? DEFAULT_ARTIFACT,
       });
     }),
   );
@@ -588,7 +593,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         contractAddress: z.string().min(1).describe('AttestationVault deployment'),
         contentRoot: hex64('contentRoot').optional().describe('Optional Merkle root (64 hex) to anchor first'),
         schemaId: hex64('schemaId').optional().describe('Schema id of the field list, required whenever contentRoot is supplied'),
-        compiledArtifactRef: z.string().optional().describe("Contract artifact ref, defaults to 'attestation-vault'"),
+        compiledArtifactRef: z.string().optional().describe("Contract artifact ref, defaults to 'attestation-vault-32'; 'attestation-vault' for a 16-slot vault"),
         idempotencyKey: z.string().optional().describe('Dedupes retries'),
         sponsorSessionId: z.string().uuid().optional().describe('Optional second session that pays the dust fee'),
       },
@@ -610,7 +615,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         dirs: args.dirs,
         sessionId: args.sessionId,
         contractAddress: args.contractAddress,
-        compiledArtifactRef: args.compiledArtifactRef,
+        compiledArtifactRef: args.compiledArtifactRef ?? DEFAULT_ARTIFACT,
         idempotencyKey: args.idempotencyKey,
         sponsorSessionId: args.sponsorSessionId,
       });
@@ -649,7 +654,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         contractAddress: z.string().min(1).describe('AttestationVault deployment'),
         contentRoot: hex64('contentRoot').optional().describe('Optional Merkle root (64 hex) to anchor first'),
         schemaId: hex64('schemaId').optional().describe('Schema id of the field list, required whenever contentRoot is supplied'),
-        compiledArtifactRef: z.string().optional().describe("Contract artifact ref, defaults to 'attestation-vault'"),
+        compiledArtifactRef: z.string().optional().describe("Contract artifact ref, defaults to 'attestation-vault-32'; 'attestation-vault' for a 16-slot vault"),
         idempotencyKey: z.string().optional().describe('Dedupes retries'),
         sponsorSessionId: z.string().uuid().optional().describe('Optional second session that pays the dust fee'),
       },
@@ -681,7 +686,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         dirs: args.dirs,
         sessionId: args.sessionId,
         contractAddress: args.contractAddress,
-        compiledArtifactRef: args.compiledArtifactRef,
+        compiledArtifactRef: args.compiledArtifactRef ?? DEFAULT_ARTIFACT,
         idempotencyKey: args.idempotencyKey,
         sponsorSessionId: args.sponsorSessionId,
       });
@@ -712,7 +717,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         contractAddress: z.string().min(1).describe('AttestationVault deployment'),
         contentRoot: hex64('contentRoot').optional().describe('Optional Merkle root anchored as first call of the same batch'),
         schemaId: hex64('schemaId').optional().describe('Schema id of the field list, required whenever contentRoot is supplied'),
-        compiledArtifactRef: z.string().optional().describe("Contract artifact ref, defaults to 'attestation-vault'"),
+        compiledArtifactRef: z.string().optional().describe("Contract artifact ref, defaults to 'attestation-vault-32'; 'attestation-vault' for a 16-slot vault"),
         idempotencyKey: z.string().optional().describe('Dedupes retries'),
         sponsorSessionId: z.string().uuid().optional().describe('Optional second session that pays the dust fee'),
       },
@@ -730,7 +735,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
           'threshold' in c ? { ...c, threshold: String(c.threshold) } : c),
         sessionId: args.sessionId,
         contractAddress: args.contractAddress,
-        compiledArtifactRef: args.compiledArtifactRef,
+        compiledArtifactRef: args.compiledArtifactRef ?? DEFAULT_ARTIFACT,
         idempotencyKey: args.idempotencyKey,
         sponsorSessionId: args.sponsorSessionId,
       });
@@ -766,7 +771,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         contentRootA: hex64('contentRootA').optional().describe('Optional: anchor A\'s root in the same flow'),
         contentRootB: hex64('contentRootB').optional().describe('Optional: anchor B\'s root in the same flow'),
         schemaId: hex64('schemaId').optional().describe('Shared schema id, required whenever a contentRoot is supplied'),
-        compiledArtifactRef: z.string().optional().describe("Contract artifact ref, defaults to 'attestation-vault'"),
+        compiledArtifactRef: z.string().optional().describe("Contract artifact ref, defaults to 'attestation-vault-32'; 'attestation-vault' for a 16-slot vault"),
         idempotencyKey: z.string().optional().describe('Dedupes retries'),
         sponsorSessionId: z.string().uuid().optional().describe('Optional second session that pays the dust fee'),
       },
@@ -787,7 +792,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         schemaId: args.schemaId,
         sessionId: args.sessionId,
         contractAddress: args.contractAddress,
-        compiledArtifactRef: args.compiledArtifactRef,
+        compiledArtifactRef: args.compiledArtifactRef ?? DEFAULT_ARTIFACT,
         idempotencyKey: args.idempotencyKey,
         sponsorSessionId: args.sponsorSessionId,
       });
@@ -822,7 +827,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         contentRootA: hex64('contentRootA').optional().describe('Optional: anchor A\'s root in the same flow'),
         contentRootB: hex64('contentRootB').optional().describe('Optional: anchor B\'s root in the same flow'),
         schemaId: hex64('schemaId').optional().describe('Shared schema id, required whenever a contentRoot is supplied'),
-        compiledArtifactRef: z.string().optional().describe("Contract artifact ref, defaults to 'attestation-vault'"),
+        compiledArtifactRef: z.string().optional().describe("Contract artifact ref, defaults to 'attestation-vault-32'; 'attestation-vault' for a 16-slot vault"),
         idempotencyKey: z.string().optional().describe('Dedupes retries'),
         sponsorSessionId: z.string().uuid().optional().describe('Optional second session that pays the dust fee'),
       },
@@ -842,7 +847,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         schemaId: args.schemaId,
         sessionId: args.sessionId,
         contractAddress: args.contractAddress,
-        compiledArtifactRef: args.compiledArtifactRef,
+        compiledArtifactRef: args.compiledArtifactRef ?? DEFAULT_ARTIFACT,
         idempotencyKey: args.idempotencyKey,
         sponsorSessionId: args.sponsorSessionId,
       })),
@@ -863,7 +868,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
           .describe('0=public, 1=legitimate-interest, 2=authority'),
         sessionId: z.string().uuid().describe('Wallet session id (must be the attester)'),
         contractAddress: z.string().min(1).describe('AttestationVault deployment'),
-        compiledArtifactRef: z.string().optional().describe("Contract artifact ref, defaults to 'attestation-vault'"),
+        compiledArtifactRef: z.string().optional().describe("Contract artifact ref, defaults to 'attestation-vault-32'; 'attestation-vault' for a 16-slot vault"),
         idempotencyKey: z.string().optional().describe('Dedupes retries'),
         sponsorSessionId: z.string().uuid().optional().describe('Optional second session that pays the dust fee'),
       },
@@ -875,7 +880,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         level: args.level,
         sessionId: args.sessionId,
         contractAddress: args.contractAddress,
-        compiledArtifactRef: args.compiledArtifactRef,
+        compiledArtifactRef: args.compiledArtifactRef ?? DEFAULT_ARTIFACT,
         idempotencyKey: args.idempotencyKey,
         sponsorSessionId: args.sponsorSessionId,
       })),
@@ -892,7 +897,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         grantee: hex64('grantee').describe('Grantee identity (64 hex Bytes<32>)'),
         sessionId: z.string().uuid().describe('Wallet session id (must be the attester)'),
         contractAddress: z.string().min(1).describe('AttestationVault deployment'),
-        compiledArtifactRef: z.string().optional().describe("Contract artifact ref, defaults to 'attestation-vault'"),
+        compiledArtifactRef: z.string().optional().describe("Contract artifact ref, defaults to 'attestation-vault-32'; 'attestation-vault' for a 16-slot vault"),
         idempotencyKey: z.string().optional().describe('Dedupes retries'),
         sponsorSessionId: z.string().uuid().optional().describe('Optional second session that pays the dust fee'),
       },
@@ -903,7 +908,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         grantee: args.grantee,
         sessionId: args.sessionId,
         contractAddress: args.contractAddress,
-        compiledArtifactRef: args.compiledArtifactRef,
+        compiledArtifactRef: args.compiledArtifactRef ?? DEFAULT_ARTIFACT,
         idempotencyKey: args.idempotencyKey,
         sponsorSessionId: args.sponsorSessionId,
       })),
@@ -954,7 +959,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         bind: z.boolean().optional()
           .describe('false (default): unbound for sponsor_unbound_transaction; true: finalized for sponsor_finalized_transaction'),
         compiledArtifactRef: z.enum(BUILDABLE_ARTIFACTS).optional()
-          .describe("Vault lineage to build against, defaults to 'attestation-vault'. Use 'attestation-vault-32' for a 32-slot vault: it has its own circuits, so the builder loads that contract class and fetches ITS prover keys from the server's /zk-config. The address must belong to the lineage named here"),
+          .describe("Vault lineage to build against, defaults to 'attestation-vault-32' (the hosted sandbox vaults). Use 'attestation-vault' for a 16-slot vault: it has its own circuits, so the builder loads that contract class and fetches ITS prover keys from the server's /zk-config. The address must belong to the lineage named here"),
         outFile: z.string().min(1).optional()
           .describe('Also write the built bytes as base64 to this path, for a sponsor tool on another server (its file argument)'),
       },
@@ -963,7 +968,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
       if (!config) throw new Error('local building is not configured for this server instance');
       return buildSponsorable(config, {
         contractAddress: args.contractAddress, call: args.call, params: args.params, bind: args.bind === true,
-        compiledArtifactRef: args.compiledArtifactRef,
+        compiledArtifactRef: args.compiledArtifactRef ?? DEFAULT_ARTIFACT,
         merkleProof: args.merkleProof, docPair: args.docPair, outFile: args.outFile,
       });
     }),
@@ -998,7 +1003,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         'outside it. The transaction expires with its TTL (default 30 min), so hand it over ' +
         'promptly. This is the SERIAL channel (one tx per sponsor wallet at a time); for ' +
         'parallel submission build with bind:false and use sponsor_unbound_transaction. ' +
-        'The server picks the wallet that pays. Poll get_job_status with the sessionId ' +
+        'The server picks the wallet that pays. Call get_job_status with the sessionId ' +
         'RETURNED by this call. ' + POLL_HINT,
       inputSchema: {
         txId: TX_ID.describe('txId returned by build_sponsorable_transaction (bind:true) on this server; the bytes never pass through the conversation'),
@@ -1034,7 +1039,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         'calls against the SAME contract in one block conflict, the loser lands on-chain but its ' +
         'call does not apply and the job ends failed with errorCode CHAIN_EXECUTION_FAILED (the ' +
         'transaction hash is in the error); then REBUILD the transaction against the current ' +
-        'contract state and sponsor again (never resubmit the same bytes). Poll get_job_status ' +
+        'contract state and sponsor again (never resubmit the same bytes). Call get_job_status ' +
         'with the sessionId RETURNED by this call. ' + POLL_HINT,
       inputSchema: {
         txId: TX_ID.describe('txId returned by build_sponsorable_transaction on this server; the bytes never pass through the conversation'),
@@ -1127,7 +1132,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         'refuses when they differ from `expect`, builds and proves the mirror half from this ' +
         'server\'s wallet (it spends what the offer wants and creates what the offer gives). ' +
         'With submit: true the two halves go to the sponsor at once and the answer is the ' +
-        'job ({ jobId, status, sessionId, id, terms }): poll get_job_status with the returned ' +
+        'job ({ jobId, status, sessionId, id, terms }): call get_job_status with the returned ' +
         'sessionId. Without it the answer carries both halves for sponsor_swap. ALWAYS pass ' +
         '`expect` with the terms you agreed to: an offer is text from someone else. With offerId ' +
         'the board entry is read first and the call refuses, before proving, when it is not open ' +
@@ -1205,11 +1210,11 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         'never NIGHT, at most 4 inputs and 2 outputs per half, and the halves mirror each other ' +
         'in types and amounts. A half may be bound or unbound and is passed as offer file text ' +
         'or base64. Off on a server by default (NIGHTGATE_SPONSOR_ALLOW_SWAPS); an agent grant ' +
-        'needs sponsorSwap in its allowedActions. Job result { txHash, swap: { gives, wants } }. ' +
+        'needs sponsorSwap in its allowedActions. Job result { txHash, transactionHash, swap: { gives, wants } }. ' +
         'An offer fills once: if it was taken first by somebody else the job fails. Pass both ' +
         'halves, or `halfId` alone for an offer this server took (take_swap_offer keeps both ' +
         'halves); with `offerId` the maker half comes from the board, next to takerHalf or the ' +
-        'halfId of the taken offer. Poll get_job_status with the sessionId RETURNED by this call. ' + POLL_HINT,
+        'halfId of the taken offer. Call get_job_status with the sessionId RETURNED by this call. ' + POLL_HINT,
       inputSchema: {
         makerHalf: swapHalf("The maker's half (the offer)").optional(),
         takerHalf: swapHalf("The taker's half").optional(),
@@ -1471,7 +1476,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         'response names the token before the job runs ({ tokenType, domain, issuerKey }); a ' +
         'landed mint makes the type known to the sponsor (swaps, offer board). The recipient ' +
         'defaults to this wallet (get_attester_identity); another wallet takes both of its keys. ' +
-        'Job result { txHash, ... }. Poll get_job_status with the sessionId RETURNED by this call. ' + POLL_HINT,
+        'Job result { txHash, transactionHash, ... }. Call get_job_status with the sessionId RETURNED by this call. ' + POLL_HINT,
       inputSchema: {
         contractAddress: hex64('contractAddress').describe('A token-factory deployment'),
         name: z.string().min(1).refine((s) => Buffer.byteLength(s, 'utf8') <= 32, 'name must be at most 32 UTF-8 bytes')
@@ -1540,10 +1545,13 @@ export function registerTools(server: McpServer, client: NightgateClient, config
     'get_job_status',
     {
       description:
-        'Poll the status of an async NIGHTGATE job (all submit actions return a jobId). ' +
+        'Status of an async NIGHTGATE job (all submit actions return a jobId). ' +
         'status: pending | running | external_execution | submitted | reconciliation_required | ' +
-        'succeeded | failed. Poll every few seconds until succeeded or failed; result carries ' +
-        'the job outcome JSON, chainStatus tracks on-chain finalization independently. ' +
+        'succeeded | failed. The server holds the call up to waitMs (default 20 s) until the job ' +
+        'settles, so call it again only if the status is still open; result carries the job outcome ' +
+        'JSON, chainStatus tracks on-chain finalization independently. txHash and transactionId are ' +
+        'the ledger identifier (stable, tracks the job); transactionHash is the hash explorers show, ' +
+        'null until indexed. ' +
         'Sponsor jobs: failed + errorCode CHAIN_EXECUTION_FAILED = the transaction IS on-chain but ' +
         'the contract call did not apply (same-contract conflict) -> rebuild and sponsor again; ' +
         'reconciliation_required = broadcast outcome unknown to the server yet, the transaction ' +
@@ -1555,13 +1563,21 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         jobId: z.string().uuid().describe('Job id returned by a submit action'),
         sessionId: z.string().uuid()
           .describe('Wallet session id the job belongs to; for sponsor jobs the sessionId RETURNED by the sponsor call'),
+        waitMs: z.number().int().min(0).max(25_000).optional()
+          .describe('ms the server waits for the job to settle before it answers; default 20000, 0 answers at once'),
       },
     },
     run(async (args) => {
-      const job = await client.callAction('getJobStatus', {
-        jobId: args.jobId,
-        sessionId: args.sessionId,
-      }) as Record<string, unknown> | undefined;
+      const ask = { jobId: args.jobId, sessionId: args.sessionId };
+      const waitMs = jobWait ? Math.min(args.waitMs ?? JOB_WAIT_MS, Math.max(0, (config?.timeoutMs ?? 30_000) - 5_000)) : 0;
+      let job: Record<string, unknown> | undefined;
+      try {
+        job = await client.callAction('getJobStatus', waitMs > 0 ? { ...ask, waitMs } : ask) as Record<string, unknown> | undefined;
+      } catch (err) {
+        if (!(waitMs > 0 && err instanceof NightgateApiError && err.status === 400 && /waitMs/.test(err.message))) throw err;
+        jobWait = false;
+        job = await client.callAction('getJobStatus', ask) as Record<string, unknown> | undefined;
+      }
       settleHalfJob(args.jobId, job?.status);
       return job;
     }),

@@ -21,7 +21,8 @@ NIGHTGATE instance, and which versions it needs.
 Also: `NIGHTGATE_NODE_URL`, `NIGHTGATE_SERVICE_PATH` (`/odata/v4/midnight`),
 `NIGHTGATE_INDEXER_SERVICE_PATH` (`/odata/v4/midnight-indexer`; a server below
 0.35.0 needs `/api/v1/nightgate` and `/api/v1/indexer`), `ODATANO_ANALYTICS_URL`,
-`NIGHTGATE_ZK_CONFIG_BASE_URL`, `NIGHTGATE_ZK_CACHE_DIR`.
+`NIGHTGATE_ZK_CONFIG_BASE_URL` (prover keys of `attestation-vault-32`; default
+`<base>/zk-config/attestation-vault-32`), `NIGHTGATE_ZK_CACHE_DIR`.
 
 ## Own instance
 
@@ -36,7 +37,8 @@ Then `ODATANO_ACCESS_URL=http://localhost:4004`, `ODATANO_ACCESS_USER=nightgate`
 
 ## Compatibility
 
-NIGHTGATE >= 0.36.0, which the hosted gateway runs. Local building needs
+NIGHTGATE >= 0.36.0; `get_job_status` waits on the server from 0.37.0 and polls
+on an older one. The hosted gateway runs 0.37.0. Local building needs
 `@odatano/nightgate-tx` >= 0.14.0 next to the server, local minting also
 `@odatano/contract-token-factory`. What an older server lacks per version:
 [CHANGELOG](CHANGELOG.md).
