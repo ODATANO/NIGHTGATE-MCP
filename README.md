@@ -13,10 +13,10 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-yellow)](LICENSE)
 
 MCP server for [NIGHTGATE](https://github.com/ODATANO/NIGHTGATE) on Midnight.
-Anchors documents, proves zero-knowledge claims over hidden fields, grants and
-verifies disclosure against live contract state; swaps shielded tokens over an
-offer board and mints them on a token factory. Transactions are sponsored, the
-agent holds no NIGHT. The chain is read through the
+Anchors documents, proves zero-knowledge claims over hidden fields, grants
+disclosure, and verifies records and claims against live contract state;
+swaps shielded tokens over an offer board and mints them on a token factory.
+Transactions are sponsored, the agent holds no NIGHT. The chain is read through the
 [ODATANO API](https://api.odatano.dev): no indexer, no node.
 
 ## Quick start
@@ -41,17 +41,25 @@ Claude Code: `claude mcp add nightgate --env ODATANO_ACCESS_KEY=oda_... -- npx -
 The hosted gateway is the default (Midnight preprod). The same key works for
 `@odatano/core-mcp` (Cardano). Node.js >= 20.
 
+That is all the setup. `anchor_document` with the sha256 of a document anchors
+it in the shared sandbox vault and answers once it landed, with the free
+`verify_attestation` call that shows it on-chain. The first write creates your
+seed in `~/.nightgate-mcp/seed` and says so; keep that file, it is your
+identity on Midnight. `get_usage` shows the units left on the key.
+
 ## Tools
 
-[docs/tools.md](docs/tools.md) lists every tool and the two flows: fee
-sponsoring (build and prove here, a sponsor pays) and shielded swaps (two
-halves, one sponsor). Errors carry the server's HTTP status and `code`.
+[docs/tools.md](docs/tools.md) lists every tool, what a write returns, the
+sandbox vaults, the seed, field claims and shielded swaps. Every write is
+built and proven here, a sponsor pays, and the tool waits for the result.
+Errors carry the server's HTTP status and `code`.
 
 ## Configuration
 
 [docs/configuration.md](docs/configuration.md): every variable, an own
 NIGHTGATE instance, version requirements. Needs NIGHTGATE >= 0.36.0; from 0.37.0,
-which the hosted gateway runs, `get_job_status` waits on the server.
+which the hosted gateway runs, the server holds each status read until the job
+settles.
 
 ## Development
 

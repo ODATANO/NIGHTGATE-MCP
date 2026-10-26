@@ -64,22 +64,11 @@ console.log(`attester ${me.attesterId.slice(0, 16)}… (local seed, never sent)`
 
 async function submit(label, call_, params, extra = {}) {
     const t0 = Date.now();
-    const built = await call('build_sponsorable_transaction', {
+    const job = await call('submit_vault_call', {
         contractAddress: VAULT, call: call_, params, compiledArtifactRef: ARTIFACT, ...extra,
     });
-    console.log(`  ${label}: proven locally in ${((Date.now() - t0) / 1000).toFixed(1)}s (${built.serializedBytes} B)`);
-    const { jobId, sessionId } = await call('sponsor_unbound_transaction', {
-        unboundTxB64: built.unboundTxB64,
-    });
-    for (;;) {
-        await new Promise((r) => setTimeout(r, 3000));
-        const job = await call('get_job_status', { jobId, sessionId });
-        if (['succeeded', 'failed', 'reconciliation_required'].includes(job.status)) {
-            if (job.status !== 'succeeded') fail(`${label} job ${job.status}: ${job.errorMessage ?? ''}`);
-            console.log(`  ${label}: sponsored, tx ${String(JSON.parse(job.result || '{}').txHash ?? '').slice(0, 18)}…`);
-            return;
-        }
-    }
+    if (job.status !== 'succeeded') fail(`${label} job ${job.status}: ${job.errorMessage ?? ''} ${job.next ?? ''}`);
+    console.log(`  ${label}: built here and sponsored in ${((Date.now() - t0) / 1000).toFixed(1)}s, tx ${String(job.txHash ?? '').slice(0, 18)}…`);
 }
 
 // 2. Anchor the payload and its content root, then prove the claim.

@@ -1,9 +1,5 @@
-/**
- * The txbuilder entry of `@odatano/nightgate-tx`, an optional peer the server
- * loads on first use. Every feature names what it needs and the version that
- * carries it, so a missing or old install fails with that instead of a bare
- * resolution error.
- */
+// The txbuilder entry of @odatano/nightgate-tx, loaded on first use. Each feature names the version it
+// needs, so an old install fails with that instead of a bare resolution error.
 let modulePromise: Promise<any> | undefined;
 
 export async function loadTxModule(feature: string, minVersion: string): Promise<any> {

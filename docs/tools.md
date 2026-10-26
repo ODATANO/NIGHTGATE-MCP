@@ -1,60 +1,122 @@
 # Tools of @odatano/nightgate-mcp
 
-Every tool, what it does, and the two flows that chain several of them. Async
-tools return `{ jobId, status }`; `get_job_status` waits on the server until the
-job settles (`waitMs`, default 20 s). The server reads the chain through the
-ODATANO API; only the swap wallet syncs from a Midnight indexer. Vault tools
-default to `attestation-vault-32`, the lineage of the hosted sandbox vaults;
-pass `compiledArtifactRef: 'attestation-vault'` for a 16-slot vault.
+Every tool and what it returns. Writes are built, proven and signed here with
+the caller seed, a sponsor pays the fee, and the tool waits until the job
+settled. Reads of contract state are free. Vault tools default to the shared
+sandbox vault of the network and to the `attestation-vault-32` lineage.
+
+## First anchor
+
+With only `ODATANO_ACCESS_KEY` set:
+
+1. `anchor_document` with the sha256 of a document. It builds the transaction,
+   the sponsor pays, and after about a minute the answer carries `status`,
+   `attesterId`, `txHash` and `check`.
+2. `check` is the `verify_attestation` call that shows the record on-chain.
+   Run it as given. It is free.
+
+The first build downloads the prover keys and creates the seed file (see
+[Seed](#seed)).
 
 ## All tools
 
 | Tool | What it does |
 |---|---|
-| `verify_attestation`, `verify_predicate`, `verify_predicate_attestation`, `verify_document` | Check records and ZK claims against live contract state; absent = `verified: false` |
+| `verify_attestation`, `verify_predicate` | Check a record or a ZK claim against live contract state; absent = `verified: false`. Free |
 | `prepare_document_proof`, `prepare_membership_set` | Build proof inputs: salted content tree, set root |
-| `anchor_document`, `attest_agent_output` | Anchor a document hash or an agent-output envelope (async) |
-| `prove_field_predicate`, `prove_field_equality`, `prove_field_membership` | ZK claims over one hidden field (async) |
-| `prove_field_predicates_batch` | Up to 8 claims in one transaction (async) |
-| `prove_document_integrity`, `prove_document_diff` | ZK claims across two documents (async) |
-| `grant_disclosure`, `revoke_disclosure` | On-chain disclosure ACL (async) |
-| `build_sponsorable_transaction`, `get_attester_identity` | Build, prove and sign a vault call locally; the bytes stay here under a `txId`, or go to `outFile`. The attester id and shielded keys of the seed |
-| `sponsor_unbound_transaction`, `sponsor_finalized_transaction` | Hand a built transaction by `txId` or `file` to a sponsor that pays and submits (async); the result says what was sent |
+| `anchor_document` | Anchor a document hash, optionally with its content root, in one call |
+| `submit_vault_call` | Any vault call in one call: ZK claims over a hidden field, claims across two documents, disclosure, passports |
+| `build_sponsorable_transaction`, `get_attester_identity` | Build a vault call and keep the bytes under a `txId` or in `outFile`, for a sponsor elsewhere. The attester id and shielded keys of the seed |
+| `sponsor_unbound_transaction`, `sponsor_finalized_transaction` | Hand bytes built elsewhere to a sponsor, by `txId` or `file`, and wait for the job |
 | `get_swap_wallet`, `read_swap_offer` | Shielded coins of the local wallet; what an offer gives and wants |
 | `build_swap_offer`, `take_swap_offer`, `revert_swap_offer` | Build one half of a shielded swap locally, take an offer, release a half |
-| `sponsor_swap` | Hand both halves of a swap, or a board offer plus the taker half, to a sponsor that merges, pays and submits (async) |
+| `sponsor_swap` | Hand both halves of a swap, or a board offer plus the taker half, to a sponsor and wait |
 | `post_swap_offer`, `list_swap_offers`, `retire_swap_offer` | The server's offer board: post a maker half, find open offers, take yours down |
 | `get_swap_offer`, `my_swap_offers`, `get_board_status` | Follow one offer, see your own posts and their fills, read the board's counts without credentials |
-| `mint_token` | Mint a shielded token with a name of your own on a token factory: built here with the seed as issuer and sponsored, or by a server session (async) |
-| `grant_disclosure_to_holders`, `revoke_holder_disclosure`, `claim_disclosure`, `holder_claim_key` | Disclose a document to the holders of a token; read it with the secret behind a registered claim key |
+| `mint_token` | Mint a shielded token with a name of your own on a token factory; the seed is the issuer |
 | `derive_token_type` | Token type a minting contract produces |
-| `get_job_status` | Waits for an async job; `transactionHash` for explorers, batches report `chainSegments`, swaps `swap` |
-| `get_grant_usage` | What the key did and what it may still do: hour and day budgets, rate classes with what is left |
+| `get_usage` | What the key has left and what each call cost. Free |
 | `analytics_*` | Midnight aggregates via ODATANO ASTRA, when the host serves it |
 
 Errors carry the server's HTTP status and `code` (`INVALID_ARGUMENT`, ...).
 
-## Fee sponsoring
+## What a write returns
 
-The caller builds, the server pays. Needs `@odatano/nightgate-tx` next to the
-server and `NIGHTGATE_SEED_HEX`; the contract state is read through the API.
+| Field | Meaning |
+|---|---|
+| `status` | `succeeded`, `failed`, or `pending` when the job is still open after 5 minutes or its status cannot be read |
+| `txHash` | Ledger identifier of the transaction |
+| `transactionHash` | Hash the explorers show, null until indexed |
+| `result` | The job result, for a swap `swap`, for a mint `tokenType` |
+| `errorCode`, `errorMessage`, `next` | Why it failed and what to do |
+| `statusError` | With `pending`: why the status could not be read |
+| `check` | `{ tool, args }`: the call that shows the effect on-chain |
+| `seed` | Only once, when this call created the seed file |
 
-1. `build_sponsorable_transaction` builds, proves and signs the call locally
-   and returns a `txId`. The bytes never travel as a tool argument.
-2. `sponsor_unbound_transaction` with the `txId`, or with `file` for bytes
-   built elsewhere; the server's sponsor pool pays and submits.
-3. `get_job_status` with the returned `sessionId`, then `verify_attestation`.
+`failed` with `CHAIN_EXECUTION_FAILED`: the transaction is on-chain but its
+contract call did not apply, usually because another call changed the same
+contract in that block. Run the tool again. It builds against the new state.
 
-`failed` / `CHAIN_EXECUTION_FAILED`: landed but not applied; build again, never
-resubmit the same bytes.
+A tool that was cut off, for example by a client timeout, or that came back
+`pending`: run it again with the same arguments. It picks up the job it
+started and submits nothing new, so there is no second fee.
+
+While a call runs it sends MCP progress every 5 seconds, so a client that
+resets its request timeout on progress keeps the call open.
+
+## Sandbox vaults
+
+`contractAddress` defaults to the shared sandbox vault of the network. Both
+are `attestation-vault-32` and open to every key; a 16-slot
+`attestation-vault` needs its address:
+
+| Network | Vault |
+|---|---|
+| preprod | `ca0b1e3c601857a7b6940bbbbd6508654f5983b63aa36ccf8254f7700f89aead` |
+| preview | `31df87bc396ab32e8408b0ebfd1f8e7bf121f17e12e2ba360ed9f08c7ba40692` |
+
+Mainnet has no sandbox vault; pass `contractAddress` there.
+
+## Seed
+
+The seed is the caller's identity on Midnight. Every record anchored with it
+belongs to its `attesterId`, and only it can prove claims on or revoke
+disclosures of those records.
+
+- `NIGHTGATE_SEED_HEX` set: that seed is used.
+- Unset: the seed is read from `NIGHTGATE_SEED_FILE` (default
+  `~/.nightgate-mcp/seed`). Without that file the first tool that needs the
+  seed creates it, readable by the owner only, and its answer carries
+  `seed: { created, file, meaning }`.
+
+Keep the file and back it up.
+
+## Field claims
+
+1. `prepare_document_proof` with the document and the fields to make
+   provable. Keep `opening` with the document.
+2. `anchor_document` with `sha256: payloadHash`, `contentRoot` and `schemaId`.
+3. `submit_vault_call` with `proveFieldPredicate`, `proveFieldEquality` or
+   `proveFieldMembership`, the params listed in `build_sponsorable_transaction`
+   and the field's witness as `merkleProof`. The witness stays here.
+4. `check` names the `verify_predicate` call for the claim.
+
+## verify_attestation fields
+
+| Field | Meaning |
+|---|---|
+| `verified` | The record stands and every given check matched |
+| `attested` | The attester's record of `payloadHash` is in the vault |
+| `contentRootOk`, `schemaOk` | The given `contentRoot` and `schemaId` match the anchor |
+| `bindingRegistered` | Only for lookups by `documentId`: the vault registrar assigned that id to this attester. A record anchored without a document id reports `false`, and that is fine |
+| `recordKey` | Ledger key of the record, `recordKey(attesterId, payloadHash)` |
 
 ## Shielded swaps
 
 Two wallets exchange two shielded tokens without a contract. Each side builds
 one half, the halves mirror each other, a sponsor merges them and pays the fee.
-Needs `@odatano/nightgate-tx` next to the server, `NIGHTGATE_SEED_HEX` and a
-Midnight indexer the swap wallet syncs its coins from (`NIGHTGATE_INDEXER_HTTP_URL`,
-`NIGHTGATE_INDEXER_WS_URL`).
+Needs a Midnight indexer the swap wallet syncs its coins from
+(`NIGHTGATE_INDEXER_HTTP_URL`, `NIGHTGATE_INDEXER_WS_URL`).
 
 1. `get_swap_wallet`: balance, free coins and `spendable` per token type. The
    first call starts the sync of the shielded coins (about 5 minutes from
@@ -64,9 +126,8 @@ Midnight indexer the swap wallet syncs its coins from (`NIGHTGATE_INDEXER_HTTP_U
    board.
 3. Taker: `list_swap_offers` or `read_swap_offer`, then `take_swap_offer` with
    `expect`, `submit: true` and, for a board entry, its `offerId`. It builds
-   the mirror half and submits both; the server's sponsor pool pays.
-4. `get_job_status` with the returned `sessionId`; the result carries `swap`.
-   The maker follows the offer with `get_swap_offer` or `my_swap_offers`
+   the mirror half, submits both and waits; the result carries `swap`.
+4. The maker follows the offer with `get_swap_offer` or `my_swap_offers`
    (`filled` + `filledTxHash`); `list_swap_offers` with `status: all` and
    `since` is the board's change feed.
 
@@ -80,8 +141,7 @@ Midnight indexer the swap wallet syncs its coins from (`NIGHTGATE_INDEXER_HTTP_U
 - With `NIGHTGATE_PROOF_SERVER_URL` the proof server sees the coins a half
   spends: use one you run yourself.
 - Tokens to swap: `mint_token` mints on a token factory to this wallet, or to
-  any wallet whose two keys are given. Without a `sessionId` the seed is the
-  issuer, the mint is built here and the sponsor pays; this needs
+  any wallet whose two keys are given; this needs
   `@odatano/contract-token-factory` next to `@odatano/nightgate-tx`. A landed
   mint makes the type known to the sponsor.
 - `get_board_status` says whether a sponsor is ready before anything is built.

@@ -9,6 +9,7 @@ import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import type { NightgateMcpConfig } from './config.js';
 import { txExport } from './tx-module.js';
+import { ensureSeed } from './seed.js';
 
 export interface SwapLeg {
   tokenType: string;
@@ -119,9 +120,7 @@ async function writeState(path: string | undefined, wallet: any): Promise<void> 
 }
 
 async function openWallet(config: NightgateMcpConfig): Promise<OpenWallet> {
-  if (!config.seedHex) {
-    throw new Error('swaps need NIGHTGATE_SEED_HEX in the MCP server environment; it is never a tool argument');
-  }
+  await ensureSeed(config);
   const { indexerHttpUrl, indexerWsUrl } = config;
   if (!indexerHttpUrl || !indexerWsUrl) {
     throw new Error('swaps need NIGHTGATE_INDEXER_HTTP_URL and NIGHTGATE_INDEXER_WS_URL in the MCP server environment: a Midnight indexer the swap wallet syncs its coins from');
@@ -288,6 +287,11 @@ export function trackHalfJob(id: string, jobId: unknown): void {
 }
 
 /** A landed swap spent its coins: its half is no longer pending. A failed one stays, so it can be reverted. */
+/** Job ids of the halves still listed, so the caller can ask whether their swap landed. */
+export function halfJobIds(): string[] {
+  return [...new Set([...pending.values()].map((p) => p.jobId).filter((j): j is string => !!j))];
+}
+
 export function settleHalfJob(jobId: string, status: unknown): void {
   if (status !== 'succeeded') return;
   for (const [id, half] of pending) if (half.jobId === jobId) pending.delete(id);

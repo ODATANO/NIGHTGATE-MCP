@@ -1,20 +1,11 @@
-/**
- * Local transaction building (caller half of cross-server fee sponsoring).
- *
- * Wraps the `@odatano/nightgate-tx` txbuilder: build, prove (in-process wasm
- * or a proof server) and sign an AttestationVault call on THIS machine with
- * the seed from `NIGHTGATE_SEED_HEX`, so the key and the attestation secret
- * never travel; the result is the fee-unpaid transaction the sponsor tools
- * submit. Contract state comes from the NIGHTGATE API unless an indexer is
- * configured. The package is an OPTIONAL peer dependency (it carries the
- * Midnight SDK): the tool is always registered and reports how to install it
- * when it is missing.
- */
+// Builds, proves and signs a vault call here with the caller seed, via the @odatano/nightgate-tx txbuilder.
+// The seed and the attestation secret never travel; the sponsor tools submit the fee-unpaid result.
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { builderChainOptions, type NightgateMcpConfig } from './config.js';
 import { txExport } from './tx-module.js';
 import { holdBuilt, writeTxFile, type TxBytesInfo } from './built.js';
+import { ensureSeed } from './seed.js';
 
 /**
  * Call kinds this tool can prepare; one per attestation-vault helper.
@@ -128,9 +119,7 @@ async function loadModules(ref: BuildableArtifact = DEFAULT_ARTIFACT): Promise<T
  * directories, so they cannot share an instance.
  */
 async function getBuilder(config: NightgateMcpConfig, ref: BuildableArtifact = DEFAULT_ARTIFACT): Promise<any> {
-  if (!config.seedHex) {
-    throw new Error('local building needs NIGHTGATE_SEED_HEX (128 hex characters, a 64-byte BIP39 seed) in the MCP server environment; it is never a tool argument');
-  }
+  await ensureSeed(config);
   let entry = builders.get(ref);
   if (!entry) {
     entry = (async () => {
@@ -285,13 +274,13 @@ export interface SeedIdentity {
 
 /** The public identity of the seed, a pure derivation: no builder, no indexer, no zk assets. */
 export async function seedIdentity(config: NightgateMcpConfig): Promise<SeedIdentity> {
-  if (!config.seedHex) throw new Error('NIGHTGATE_SEED_HEX (128 hex characters, a 64-byte BIP39 seed) is not set in the MCP server environment');
-  const key = `${config.network}:${config.seedHex.toLowerCase()}`;
+  const seedHex = await ensureSeed(config);
+  const key = `${config.network}:${seedHex.toLowerCase()}`;
   let entry = identities.get(key);
   if (!entry) {
     entry = (async () => {
       const deriveIdentity = await txExport<(opts: { seedHex: string; networkId: string }) => Promise<any>>('deriveIdentity', 'identity derivation', '0.8.0');
-      const id = await deriveIdentity({ seedHex: config.seedHex as string, networkId: config.network });
+      const id = await deriveIdentity({ seedHex, networkId: config.network });
       return {
         attesterId: String(id.attesterId),
         shieldedAddress: String(id.addresses?.shielded ?? ''),

@@ -6,7 +6,7 @@
  *
  *   build_sponsorable_transaction (local, seed from NIGHTGATE_SEED_HEX)
  *     -> sponsor_unbound_transaction (the server's pool pays the dust)
- *     -> get_job_status until terminal
+ *     (the tool waits until the job settled)
  *     -> verify_attestation (crawler-free, attester id must be OURS)
  *
  * `@odatano/nightgate-tx` is a devDependency here, so `npm install` is enough.
@@ -67,14 +67,8 @@ const built = await call('build_sponsorable_transaction', {
 console.log(`built locally in ${((Date.now() - t0) / 1000).toFixed(1)}s (${built.provingMode}, ${built.serializedBytes} bytes, ${built.channel})`);
 
 const t1 = Date.now();
-const { jobId, sessionId } = await call('sponsor_unbound_transaction', { txId: built.txId });
-let job;
-for (;;) {
-  await new Promise(r => setTimeout(r, 3000));
-  job = await call('get_job_status', { jobId, sessionId });
-  if (['succeeded', 'failed', 'reconciliation_required'].includes(job.status)) break;
-}
-console.log(`job ${job.status} after ${((Date.now() - t1) / 1000).toFixed(1)}s`, job.errorCode ? `(${job.errorCode})` : '', (job.result || '').slice(0, 160));
+const job = await call('sponsor_unbound_transaction', { txId: built.txId });
+console.log(`job ${job.status} after ${((Date.now() - t1) / 1000).toFixed(1)}s`, job.errorCode ? `(${job.errorCode})` : '', JSON.stringify(job.result ?? '').slice(0, 160));
 
 const v = await call('verify_attestation', { contractAddress: VAULT, attesterId: me.attesterId, payloadHash, compiledArtifactRef: ARTIFACT });
 console.log('verify_attestation:', JSON.stringify(v));

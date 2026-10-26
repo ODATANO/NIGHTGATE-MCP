@@ -3,7 +3,7 @@
  * swap module of @odatano/nightgate-tx and the HTTP transport are replaced by
  * stand-ins, the MCP server and its tools are the real ones.
  */
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -167,29 +167,31 @@ try {
   // The held half goes out again by id.
   const makerOnly = await mcp.call('sponsor_swap', { halfId: built.value.id });
   if (!makerOnly.isError || !/an offer built here, not a taken one/.test(makerOnly.text)) fail(`sponsor_swap sent an offer without its taker: ${makerOnly.text.slice(0, 300)}`);
+  // sponsor_swap waits for its job: a failed one keeps the half, a landed one releases it.
+  const lastSwap = () => calls.posts.filter((p) => p.name === 'sponsorSwap').at(-1).body;
+  jobStatus = 'failed';
   const job = await mcp.call('sponsor_swap', { halfId: takenId });
-  if (job.isError || job.value.jobId !== JOB) fail(`sponsor_swap by id: ${job.text.slice(0, 300)}`);
-  const again = calls.posts.at(-1).body;
+  if (job.isError || job.value.jobId !== JOB || job.value.status !== 'failed' || !job.value.next || 'sessionId' in job.value) fail(`sponsor_swap by id: ${job.text.slice(0, 300)}`);
+  const again = lastSwap();
   if (again.makerHalfB64 !== sent.makerHalfB64 || again.takerHalfB64 !== sent.takerHalfB64) fail('sponsor_swap by id sent other halves than the taken ones');
+  if (!calls.posts.some((p) => p.name === 'getJobStatus' && p.body.jobId === JOB && p.body.sessionId === POOL)) fail('sponsor_swap did not wait on its job');
   w = await mcp.call('get_swap_wallet');
   if (w.value.pendingHalves.find((p) => p.id === takenId)?.jobId !== JOB) fail(`the job is not on its half: ${JSON.stringify(w.value.pendingHalves)}`);
-
-  // A running or failed job keeps the half, a landed one releases it.
-  await mcp.call('get_job_status', { jobId: JOB, sessionId: POOL });
-  jobStatus = 'failed';
-  await mcp.call('get_job_status', { jobId: JOB, sessionId: POOL });
-  w = await mcp.call('get_swap_wallet');
   if (w.value.pendingHalves.length !== 2) fail('a failed job released its half: it could no longer be reverted');
   jobStatus = 'succeeded';
-  await mcp.call('get_job_status', { jobId: JOB, sessionId: POOL });
+  const landed = await mcp.call('sponsor_swap', { halfId: takenId });
+  if (landed.isError || landed.value.status !== 'succeeded' || landed.value.check?.tool !== 'get_swap_wallet') fail(`sponsor_swap landed: ${landed.text.slice(0, 300)}`);
   w = await mcp.call('get_swap_wallet');
   if (!same(w.value.pendingHalves.map((p) => p.id), [built.value.id])) fail(`pending halves after the swap landed: ${JSON.stringify(w.value.pendingHalves)}`);
-  console.log('OK: sponsor_swap by halfId, the half leaves the list when its job has succeeded');
+  console.log('OK: sponsor_swap by halfId waits for its job, the half leaves the list when it has succeeded');
 
-  // Both halves passed in, as they arrive from elsewhere.
+  // Both halves passed in, as they arrive from elsewhere. A failed job keeps the half revertable.
+  jobStatus = 'failed';
   const direct = await mcp.call('sponsor_swap', { makerHalf: built.value.offer, takerHalf: 'B'.repeat(64), halfId: built.value.id });
   if (direct.isError) fail(`sponsor_swap with both halves: ${direct.text.slice(0, 300)}`);
-  if (calls.posts.at(-1).body.makerHalfB64 !== built.value.offer) fail('sponsor_swap did not pass the offer file through');
+  if (lastSwap().makerHalfB64 !== built.value.offer) fail('sponsor_swap did not pass the offer file through');
+  w = await mcp.call('get_swap_wallet');
+  if (w.value.pendingHalves.find((p) => p.id === built.value.id)?.jobId !== JOB) fail(`the job is not on the maker half: ${JSON.stringify(w.value.pendingHalves)}`);
 
   // Reverting releases the coins once.
   const reverted = await mcp.call('revert_swap_offer', { id: built.value.id });
@@ -232,15 +234,18 @@ try {
   if (last.provingMode !== 'server' || last.proofServerUrl !== 'http://127.0.0.1:6300' || last.walletState !== undefined) fail(`proof server config: ${JSON.stringify({ ...last, seedHex: '…' })}`);
   await withServer.close();
   await closeSwapWallet();
-  const noSeed = await connect(loadConfig({ ...env, NIGHTGATE_SEED_HEX: '' }));
+  // without NIGHTGATE_SEED_HEX the seed file is read; one that holds no seed is refused
+  const badSeedFile = join(dir, 'seed');
+  await writeFile(badSeedFile, 'not a seed');
+  const noSeed = await connect(loadConfig({ ...env, NIGHTGATE_SEED_HEX: '', NIGHTGATE_SEED_FILE: badSeedFile }));
   const refusedSeed = await noSeed.call('build_swap_offer', { give: { tokenType: A, amount: '1' }, want: { tokenType: B, amount: '1' } });
-  if (!refusedSeed.isError || !/NIGHTGATE_SEED_HEX/.test(refusedSeed.text)) fail(`build_swap_offer without a seed: ${refusedSeed.text.slice(0, 300)}`);
+  if (!refusedSeed.isError || !/must hold 128 hex characters/.test(refusedSeed.text)) fail(`build_swap_offer with a bad seed file: ${refusedSeed.text.slice(0, 300)}`);
   await noSeed.close();
   const noIndexer = await connect(loadConfig({ ...env, NIGHTGATE_INDEXER_WS_URL: '' }));
   const refusedIndexer = await noIndexer.call('get_swap_wallet');
   if (!refusedIndexer.isError || !/NIGHTGATE_INDEXER_HTTP_URL and NIGHTGATE_INDEXER_WS_URL/.test(refusedIndexer.text)) fail(`get_swap_wallet without an indexer: ${refusedIndexer.text.slice(0, 300)}`);
   await noIndexer.close();
-  console.log('OK: proof server from NIGHTGATE_PROOF_SERVER_URL, swaps need NIGHTGATE_SEED_HEX and an indexer');
+  console.log('OK: proof server from NIGHTGATE_PROOF_SERVER_URL, swaps need a valid seed and an indexer');
 } finally {
   await closeSwapWallet();
   await rm(dir, { recursive: true, force: true });

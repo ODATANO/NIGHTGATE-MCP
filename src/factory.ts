@@ -1,17 +1,11 @@
-/**
- * Local minting on a token factory: the caller's side of a sponsored mint.
- *
- * The issuer secret is derived from `NIGHTGATE_SEED_HEX` by the rule the
- * server applies to a session on the same seed, the `mint` call is built,
- * proven and signed here, and only the fee-unpaid transaction travels to a
- * sponsor. The builder comes from `@odatano/nightgate-tx` on the lineage
- * package `@odatano/contract-token-factory`; both are optional peers.
- */
+// Local minting on a token factory. The issuer secret is derived from the caller seed, the mint is built here,
+// and only the fee-unpaid transaction goes to a sponsor. Needs @odatano/contract-token-factory next to the package.
 import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { builderChainOptions, type NightgateMcpConfig } from './config.js';
 import { txExport } from './tx-module.js';
 import { seedIdentity } from './builder.js';
+import { ensureSeed } from './seed.js';
 
 const FACTORY_PACKAGE = '@odatano/contract-token-factory';
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -73,9 +67,7 @@ async function getFactoryBuilder(config: NightgateMcpConfig): Promise<any> {
 
 /** Build, prove and sign a mint locally; unbound, for sponsor_unbound_transaction. */
 export async function buildMint(config: NightgateMcpConfig, input: MintInput): Promise<MintBuild> {
-  if (!config.seedHex) {
-    throw new Error('minting needs NIGHTGATE_SEED_HEX (128 hex characters, a 64-byte BIP39 seed) in the MCP server environment: the seed is the issuer');
-  }
+  const seedHex = await ensureSeed(config);
   const t0 = Date.now();
   const self = await seedIdentity(config);
   const recipient = (input.recipientCoinPublicKey ?? self.coinPublicKey).toLowerCase();
@@ -89,7 +81,7 @@ export async function buildMint(config: NightgateMcpConfig, input: MintInput): P
     txExport<(pure: unknown, input: Record<string, unknown>) => Promise<{ issuer: string; domain: string; type: string }>>('tokenTypeOf', 'minting', '0.10.2'),
   ]);
   const { pureCircuits } = await loadFactoryModule();
-  const issuerSecret = await issuerSecretOf({ seedHex: config.seedHex });
+  const issuerSecret = await issuerSecretOf({ seedHex });
   const contractAddress = input.contractAddress.toLowerCase();
   const { issuer, domain, type } = await tokenTypeOf(pureCircuits, { issuerSecret, name: input.name, contractAddress });
   const b = await getFactoryBuilder(config);

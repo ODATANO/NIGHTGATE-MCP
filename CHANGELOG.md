@@ -7,6 +7,59 @@ The README says which NIGHTGATE the current version needs.
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-10-26
+
+Needs NIGHTGATE 0.36.0; from 0.37.0 the server holds each status read until the job settles.
+
+### Changed
+
+- **No tool takes a server wallet session.** Every write is built, proven and
+  signed here with the caller seed, and a sponsor pays the fee.
+- **Writes wait for their job.** `anchor_document`, `submit_vault_call`,
+  `sponsor_unbound_transaction`, `sponsor_finalized_transaction`,
+  `sponsor_swap`, `take_swap_offer` (`submit: true`) and `mint_token` return
+  `status`, `txHash`, `transactionHash`, `result`, on failure `next`, and
+  `check`, the free call that shows the effect on-chain. They send MCP progress
+  every 5 seconds. A job still open after 5 minutes, or one whose status cannot
+  be read, comes back as `pending` with its `jobId` and `txHash`.
+- **A repeated call picks up its job.** The same write with the same arguments,
+  after a client timeout or a `pending`, waits for the job it started instead
+  of submitting again. A failed job is built anew.
+- **`anchor_document(sha256, metadata?, contentRoot?, schemaId?)`** builds the
+  attest call here; with a content root it anchors that too.
+- **`contractAddress` is optional** on the vault tools: default the shared
+  sandbox vault of the network (preprod `ca0b1e3c…`, preview `31df87bc…`); a
+  16-slot `attestation-vault` needs its address.
+- **Seed file.** Without `NIGHTGATE_SEED_HEX` the seed is read from
+  `NIGHTGATE_SEED_FILE` (default `~/.nightgate-mcp/seed`) and created there on
+  first use; that answer carries `seed: { created, file, meaning }`.
+- **Free state reads.** `verify_attestation` and `verify_predicate` read the
+  public verify service (`/odata/v4/midnight-verify`) without credentials,
+  unless basic auth or an `ngat_` grant of a direct instance is set.
+  `NIGHTGATE_VERIFY_SERVICE_PATH` overrides it.
+- **`get_usage`** replaces `get_grant_usage`. With a gateway key it reads
+  `GET /me`: units left, validity, usage and the cost of the last calls.
+- `@odatano/nightgate-tx` is a dependency, no longer an optional peer.
+- `verify_attestation` describes `bindingRegistered`.
+
+### Added
+
+- `submit_vault_call(call, params, merkleProof?, docPair?)`: any vault call in
+  one go, with the calls and params of `build_sponsorable_transaction`.
+
+### Removed
+
+- `get_job_status`.
+- The tools that needed a server wallet session: `attest_agent_output`,
+  `prove_field_predicate`, `prove_field_equality`, `prove_field_membership`,
+  `prove_field_predicates_batch`, `prove_document_integrity`,
+  `prove_document_diff`, `grant_disclosure`, `revoke_disclosure`,
+  `verify_document`, `verify_predicate_attestation`. The claims and the
+  disclosure calls run through `submit_vault_call`.
+- `sessionId` on `mint_token`.
+- `grant_disclosure_to_holders`, `revoke_holder_disclosure`,
+  `claim_disclosure`, `holder_claim_key`.
+
 ## [0.17.1] - 2026-10-25
 
 Needs NIGHTGATE 0.36.0; `get_job_status` waits on the server from 0.37.0.

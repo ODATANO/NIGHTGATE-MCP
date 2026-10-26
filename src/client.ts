@@ -16,7 +16,7 @@ export class NightgateApiError extends Error {
 
 /**
  * Two error shapes reach the client: CAP's `{ error: { code, message } }`
- * from NIGHTGATE itself, and the ODATANO ACCESS gateway's `{ error: "<text>",
+ * from NIGHTGATE itself, and the ODATANO gateway's `{ error: "<text>",
  * ...detail }` (401 key problems, 402 units exhausted with a top-up hint,
  * 403 closed action or product not on the key, 429 with Retry-After).
  */
@@ -100,6 +100,17 @@ export class NightgateClient {
     return this.request('GET', `${this.config.baseUrl}${this.config.servicePath}/${functionCall(name, params)}`);
   }
 
+  /** GET <verify service>/<name>(...): the state reads. The public verify service gets no credentials and costs nothing. */
+  async callVerifyFunction(name: string, params: Record<string, FunctionParam>): Promise<unknown> {
+    const path = this.config.verifyServicePath;
+    return this.request('GET', `${this.config.baseUrl}${path}/${functionCall(name, params)}`, undefined, path !== this.config.servicePath);
+  }
+
+  /** GET <base>/me: units, validity and usage of a gateway key. */
+  async gatewayMe(): Promise<unknown> {
+    return this.request('GET', `${this.config.baseUrl}/me`);
+  }
+
   /** GET <indexer service>/<name>(...): the read-only status functions, anonymous on the server. */
   async callIndexerFunction(name: string, params: Record<string, FunctionParam> = {}): Promise<unknown> {
     return this.request('GET', `${this.config.baseUrl}${this.config.indexerServicePath}/${functionCall(name, params)}`);
@@ -172,8 +183,8 @@ export class NightgateClient {
     return headers;
   }
 
-  private async request(method: 'GET' | 'POST', url: string, body?: unknown): Promise<unknown> {
-    const headers = this.authHeaders();
+  private async request(method: 'GET' | 'POST', url: string, body?: unknown, anonymous = false): Promise<unknown> {
+    const headers: Record<string, string> = anonymous ? { Accept: 'application/json' } : this.authHeaders();
     if (body !== undefined) headers['Content-Type'] = 'application/json';
 
     const response = await fetch(url, {
