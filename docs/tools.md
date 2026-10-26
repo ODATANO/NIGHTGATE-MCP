@@ -62,7 +62,10 @@ A tool that was cut off, for example by a client timeout, or that came back
 started and submits nothing new, so there is no second fee.
 
 While a call runs it sends MCP progress every 5 seconds, so a client that
-resets its request timeout on progress keeps the call open.
+resets its request timeout on progress keeps the call open. A proof takes
+several minutes. The MCP Inspector CLI ignores progress and stops after 60
+seconds, so it cannot run the writes. With `@modelcontextprotocol/sdk`, call
+`client.callTool(params, undefined, { timeout: 600000, resetTimeoutOnProgress: true })`.
 
 ## Sandbox vaults
 
@@ -89,7 +92,9 @@ disclosures of those records.
   seed creates it, readable by the owner only, and its answer carries
   `seed: { created, file, meaning }`.
 
-Keep the file and back it up.
+Keep the file and back it up. Every server on the same machine shares that
+file and so one identity. For separate identities, give each server its own
+`NIGHTGATE_SEED_HEX` or `NIGHTGATE_SEED_FILE`.
 
 ## Field claims
 

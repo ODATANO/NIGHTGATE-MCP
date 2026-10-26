@@ -7,6 +7,23 @@ The README says which NIGHTGATE the current version needs.
 
 ## [Unreleased]
 
+## [0.18.1] - 2026-10-26
+
+Needs NIGHTGATE 0.36.0.
+
+### Fixed
+
+- **Writes from a fresh install.** `@odatano/nightgate-tx` ^0.15.1 installs one
+  copy of `@midnight-ntwrk/onchain-runtime-v3`. Two copies failed every write
+  after proving with `expected instance of StateValue`.
+
+### Documentation
+
+- `docs/tools.md`: how a client keeps a write open, and that the MCP Inspector
+  CLI stops it after 60 seconds.
+- README and `docs/tools.md`: servers on one machine share one seed file and
+  so one identity unless each sets its own seed.
+
 ## [0.18.0] - 2026-10-26
 
 Needs NIGHTGATE 0.36.0; from 0.37.0 the server holds each status read until the job settles.

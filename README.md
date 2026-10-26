@@ -45,7 +45,8 @@ That is all the setup. `anchor_document` with the sha256 of a document anchors
 it in the shared sandbox vault and answers once it landed, with the free
 `verify_attestation` call that shows it on-chain. The first write creates your
 seed in `~/.nightgate-mcp/seed` and says so; keep that file, it is your
-identity on Midnight. `get_usage` shows the units left on the key.
+identity on Midnight. Servers on one machine share it unless each sets its
+own `NIGHTGATE_SEED_HEX`. `get_usage` shows the units left on the key.
 
 ## Tools
 
