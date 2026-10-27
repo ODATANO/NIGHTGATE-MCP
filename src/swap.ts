@@ -90,6 +90,8 @@ interface PendingHalf {
   /** The board entry a maker half was posted as, and its last read status. */
   offerId?: string;
   boardStatus?: string;
+  /** When it was posted, in ms. */
+  postedAt?: number;
 }
 /** Halves built here whose swap has not landed, by id. */
 const pending = new Map<string, PendingHalf>();
@@ -302,12 +304,18 @@ export async function trackPostedHalf(offer: string, offerId: unknown): Promise<
   if (typeof offerId !== 'string' || ![...pending.values()].some((p) => p.role === 'maker')) return;
   const { decodeOffer } = await loadSwapModule();
   const half = pending.get(halfIdOf((await decodeOffer(offer)).bytes));
-  if (half?.role === 'maker') half.offerId = offerId;
+  if (half?.role === 'maker') { half.offerId = offerId; half.postedAt = Date.now(); }
 }
 
 /** Board entries of the maker halves held here. */
 export function postedOfferIds(): string[] {
   return [...pending.values()].flatMap((p) => (p.offerId ? [p.offerId] : []));
+}
+
+/** When the oldest maker half held here was posted, in ms; undefined when none is. */
+export function earliestPostedAt(): number | undefined {
+  const times = [...pending.values()].flatMap((p) => (p.offerId && p.postedAt ? [p.postedAt] : []));
+  return times.length ? Math.min(...times) : undefined;
 }
 
 /**

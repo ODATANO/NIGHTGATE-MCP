@@ -7,6 +7,19 @@ The README says which NIGHTGATE the current version needs.
 
 ## [Unreleased]
 
+## [0.18.2] - 2026-10-27
+
+Needs NIGHTGATE 0.36.0.
+
+### Fixed
+
+- **`get_swap_wallet` reads the posted offers in one call.** It settled each
+  offer posted from this server with its own `getSwapOffer`, on every call.
+  It now reads the caller's offers changed since the last read with one
+  `listSwapOffers` (`mine`, `status: all`, `since`). A failed read or a full
+  page falls back to the single reads.
+- The MCP server reports the package version instead of a fixed one.
+
 ## [0.18.1] - 2026-10-26
 
 Needs NIGHTGATE 0.36.0.

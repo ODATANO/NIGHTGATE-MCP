@@ -1,8 +1,11 @@
+import { createRequire } from 'node:module';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { NightgateClient } from './client.js';
 import type { NightgateMcpConfig } from './config.js';
 import { registerTools } from './tools.js';
 import { registerAnalyticsTools } from './analytics.js';
+
+const { version } = createRequire(import.meta.url)('../package.json') as { version: string };
 
 export interface Capabilities {
   /** True when the host serves ODATANO ASTRA (analytics) next to NIGHTGATE; see NightgateClient.analyticsStatus. */
@@ -15,7 +18,7 @@ export interface Capabilities {
  * host (schema inspection, tests) get a deterministic tool set.
  */
 export function buildServer(config: NightgateMcpConfig, caps: Capabilities = { analytics: false }): McpServer {
-  const server = new McpServer({ name: 'nightgate', version: '0.18.0' });
+  const server = new McpServer({ name: 'nightgate', version });
   const client = new NightgateClient(config);
   registerTools(server, client, config);
   if (caps.analytics) registerAnalyticsTools(server, client);

@@ -125,7 +125,8 @@ Needs a Midnight indexer the swap wallet syncs its coins from
 
 1. `get_swap_wallet`: balance, free coins and `spendable` per token type. The
    first call starts the sync of the shielded coins (about 5 minutes from
-   genesis, seconds with `NIGHTGATE_SWAP_STATE_FILE`).
+   genesis, seconds with `NIGHTGATE_SWAP_STATE_FILE`). With offers posted from
+   this server it reads their state in one `listSwapOffers` call.
 2. Maker: `build_swap_offer` with `give` and `want` returns the offer file
    (`swapoffer1...`) to publish, or `post_swap_offer` puts it on the server's
    board.

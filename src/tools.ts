@@ -5,7 +5,7 @@ import { int64, raw, NightgateApiError, NightgateClient } from './client.js';
 import { isGatewayKey, vaultOf, type NightgateMcpConfig } from './config.js';
 import { BUILDABLE_CALLS, BUILDABLE_ARTIFACTS, DEFAULT_ARTIFACT, buildSponsorable, attesterIdentity, type BuildInput } from './builder.js';
 import {
-  buildOffer, halfJobIds, postedOfferIds, readOffer, revertHalf, sameOffer, settleBoardRows, settleHalfJob, swapWalletInfo, takenHalves,
+  buildOffer, earliestPostedAt, halfJobIds, postedOfferIds, readOffer, revertHalf, sameOffer, settleBoardRows, settleHalfJob, swapWalletInfo, takenHalves,
   takeOffer, trackHalfJob, trackPostedHalf,
 } from './swap.js';
 import { buildMint } from './factory.js';
@@ -117,6 +117,19 @@ export function registerTools(server: McpServer, client: NightgateClient, config
     if (config) return vaultOf(config, contractAddress, compiledArtifactRef);
     if (!contractAddress) throw new Error('contractAddress is required');
     return contractAddress.toLowerCase();
+  };
+  // One read of the caller's own offers settles the maker halves posted here.
+  let boardReadAt: number | undefined;
+  const settlePostedOffers = async (): Promise<void> => {
+    const asked = Date.now();
+    const from = (boardReadAt ?? earliestPostedAt() ?? asked) - BOARD_OVERLAP_MS;
+    const rows = await listOffers(client, { status: 'all', since: new Date(from).toISOString(), limit: BOARD_PAGE, mine: true }).catch(() => undefined);
+    if (rows !== undefined) settleBoardRows(rows);
+    if (rows !== undefined && boardRows(rows).length < BOARD_PAGE) { boardReadAt = asked; return; }
+    // a failed read or a full page may miss an offer: read the ones still held here one by one
+    for (const offerId of postedOfferIds()) {
+      settleBoardRows(await client.callFunction('getSwapOffer', { offerId: raw(offerId) }).catch(() => undefined));
+    }
   };
 
   server.registerTool(
@@ -581,9 +594,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
     },
     run(async () => {
       if (!config) throw new Error('swaps are not configured for this server instance');
-      for (const offerId of postedOfferIds()) {
-        settleBoardRows(await client.callFunction('getSwapOffer', { offerId: raw(offerId) }).catch(() => undefined));
-      }
+      if (postedOfferIds().length) await settlePostedOffers();
       // a swap job that was still open when its tool returned may have landed since
       for (const jobId of halfJobIds()) {
         const sessionId = jobSession(jobId);
@@ -975,13 +986,24 @@ type ToolResult = {
   isError?: boolean;
 };
 
-/** listSwapOffers wants all seven parameters, null for the unused ones. */
+/** Largest page of listSwapOffers. */
+const BOARD_PAGE = 200;
+/** Margin on `since` for clock skew between this machine and the server. */
+const BOARD_OVERLAP_MS = 120_000;
+
+/** The rows of a board answer: an array or an OData collection. */
+function boardRows(result: unknown): unknown[] {
+  const value = (result as { value?: unknown })?.value;
+  return Array.isArray(result) ? result : Array.isArray(value) ? value : [];
+}
+
 /** Board rows pass through unchanged after settling the maker halves posted as them. */
 function settled<T>(rows: T): T {
   settleBoardRows(rows);
   return rows;
 }
 
+/** listSwapOffers wants all seven parameters, null for the unused ones. */
 function listOffers(client: NightgateClient, args: {
   givesType?: string; wantsType?: string; tag?: string; limit?: number; status?: string; since?: string; mine: boolean | null;
 }): Promise<unknown> {
