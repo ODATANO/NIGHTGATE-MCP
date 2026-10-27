@@ -6,6 +6,7 @@ import { builderChainOptions, type NightgateMcpConfig } from './config.js';
 import { txExport } from './tx-module.js';
 import { seedIdentity } from './builder.js';
 import { ensureSeed } from './seed.js';
+import { setStage } from './jobs.js';
 
 const FACTORY_PACKAGE = '@odatano/contract-token-factory';
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -84,7 +85,9 @@ export async function buildMint(config: NightgateMcpConfig, input: MintInput): P
   const issuerSecret = await issuerSecretOf({ seedHex });
   const contractAddress = input.contractAddress.toLowerCase();
   const { issuer, domain, type } = await tokenTypeOf(pureCircuits, { issuerSecret, name: input.name, contractAddress });
+  setStage('preparing the builder and prover keys');
   const b = await getFactoryBuilder(config);
+  setStage('proving');
   const built = await b.buildSponsorable({
     contractAddress,
     call: prepareMint({ name: input.name, amount: input.amount, recipientCoinPublicKey: recipient, issuerSecret }),

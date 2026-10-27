@@ -6,6 +6,7 @@ import { builderChainOptions, type NightgateMcpConfig } from './config.js';
 import { txExport } from './tx-module.js';
 import { holdBuilt, writeTxFile, type TxBytesInfo } from './built.js';
 import { ensureSeed } from './seed.js';
+import { setStage } from './jobs.js';
 
 /**
  * Call kinds this tool can prepare; one per attestation-vault helper.
@@ -69,6 +70,10 @@ export interface BuildOutput extends TxBytesInfo {
   provingMode: string;
   serializedBytes: number;
   buildMs: number;
+  /** Builder setup; includes the prover key download on the first call. */
+  setupMs: number;
+  /** Building, proving and signing the call. */
+  proveMs: number;
 }
 
 interface TxModules {
@@ -245,8 +250,11 @@ function prepareCall(mods: TxModules, input: BuildInput, attestationSecret: Uint
 export async function buildSponsorable(config: NightgateMcpConfig, input: BuildInput): Promise<BuildOutput> {
   const t0 = Date.now();
   const ref = input.compiledArtifactRef ?? DEFAULT_ARTIFACT;
+  setStage('preparing the builder and prover keys');
   const b = await getBuilder(config, ref);
   const mods = await loadModules(ref);
+  const t1 = Date.now();
+  setStage('proving');
   const call = prepareCall(mods, input, b.attestationSecret, String(b.attesterId));
   const built = await b.buildSponsorable({ contractAddress: input.contractAddress, call, bind: input.bind ? true : false });
   const b64 = String(input.bind ? built.finalizedTxB64 : built.unboundTxB64);
@@ -259,6 +267,8 @@ export async function buildSponsorable(config: NightgateMcpConfig, input: BuildI
     provingMode: String(b.provingMode ?? (config.proofServerUrl ? 'server' : 'wasm')),
     serializedBytes: Number(built.serializedBytes ?? 0),
     buildMs: Date.now() - t0,
+    setupMs: t1 - t0,
+    proveMs: Date.now() - t1,
   };
   return out;
 }

@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import type { RequestHandlerExtra } from '@modelcontextprotocol/sdk/shared/protocol.js';
 import type { ServerNotification, ServerRequest } from '@modelcontextprotocol/sdk/types.js';
 import { NightgateApiError, type NightgateClient } from './client.js';
@@ -21,6 +22,38 @@ const STARTED_TTL_MS = 3_600_000;
 let longPoll = true;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** The stage of the running tool call, shown in its progress messages. */
+export const callStage = new AsyncLocalStorage<{ stage?: string }>();
+
+export function setStage(stage: string): void {
+  const store = callStage.getStore();
+  if (store) store.stage = stage;
+}
+
+/** Stage of a job by its status, for the progress messages. */
+function jobStage(status: unknown): string {
+  return status === 'external_execution' || status === 'submitted'
+    ? 'submitted, waiting for the block'
+    : 'waiting for the sponsor';
+}
+
+/** Milliseconds between two timestamps of a job; undefined when one is missing. */
+function span(from: unknown, to: unknown): number | undefined {
+  const a = typeof from === 'string' ? Date.parse(from) : NaN;
+  const b = typeof to === 'string' ? Date.parse(to) : NaN;
+  return Number.isFinite(a) && Number.isFinite(b) ? Math.max(0, b - a) : undefined;
+}
+
+/** Server stages of a job from the timestamps getJobStatus returns. */
+export function serverTimings(job: Record<string, unknown>): Record<string, number> {
+  const out: Record<string, number | undefined> = {
+    queueMs: span(job.queuedAt, job.startedAt),
+    sponsorMs: span(job.startedAt, job.submittedAt),
+    settleMs: span(job.submittedAt, job.chainFinalizedAt ?? job.finishedAt),
+  };
+  return Object.fromEntries(Object.entries(out).filter(([, v]) => v !== undefined)) as Record<string, number>;
+}
 
 /** The session of every job this process started; getJobStatus needs it, the caller never sees it. */
 const sessions = new Map<string, string>();
@@ -88,6 +121,7 @@ export async function awaitJob(
   let statusError: string | undefined;
   while (job.status !== 'succeeded' && job.status !== 'failed' && Date.now() < deadline) {
     if (extra?.signal.aborted) break;
+    setStage(jobStage(job.status));
     const t0 = Date.now();
     try {
       job = { ...job, ...await readJob(client, config, jobId, sessionId) };
@@ -117,8 +151,14 @@ function outcome(job: Record<string, unknown>, check?: JobCheck, statusError?: s
     out.next = 'The job runs on. Run this tool again with the same arguments to wait for it; it submits nothing new.';
     if (statusError) out.statusError = statusError;
   }
+  const timings = { ...(isRecord(job.timings) ? job.timings : {}), ...(settled ? serverTimings(job) : {}) };
+  if (Object.keys(timings).length) out.timings = timings;
   const step = nextStep(job);
   if (step) out.next = step;
   if (check && job.status !== 'failed') out.check = check;
   return out;
+}
+
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
 }

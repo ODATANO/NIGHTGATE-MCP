@@ -7,6 +7,19 @@ The README says which NIGHTGATE the current version needs.
 
 ## [Unreleased]
 
+## [0.18.3] - 2026-10-27
+
+Needs NIGHTGATE 0.36.0.
+
+### Added
+
+- **Stage timings for writes.** `anchor_document` and `submit_vault_call`
+  return `timings`: `setupMs` and `proveMs` for the local build, `queueMs`,
+  `sponsorMs` and `settleMs` from the job's timestamps.
+- **Progress names the stage.** The progress messages say what runs, for
+  example `proving` or `submitted, waiting for the block`, instead of
+  `working`.
+
 ## [0.18.2] - 2026-10-27
 
 Needs NIGHTGATE 0.36.0.

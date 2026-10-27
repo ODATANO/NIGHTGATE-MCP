@@ -62,10 +62,25 @@ A tool that was cut off, for example by a client timeout, or that came back
 started and submits nothing new, so there is no second fee.
 
 While a call runs it sends MCP progress every 5 seconds, so a client that
-resets its request timeout on progress keeps the call open. A proof takes
-several minutes. The MCP Inspector CLI ignores progress and stops after 60
+resets its request timeout on progress keeps the call open. Each message
+names the current stage and the elapsed time, for example `proving, 45 s` or
+`submitted, waiting for the block, 130 s`. A proof takes several minutes. The MCP Inspector CLI ignores progress and stops after 60
 seconds, so it cannot run the writes. With `@modelcontextprotocol/sdk`, call
 `client.callTool(params, undefined, { timeout: 600000, resetTimeoutOnProgress: true })`.
+
+`anchor_document` and `submit_vault_call` return `timings` in milliseconds.
+A stage without both timestamps is left out.
+
+| Field | Stage |
+|---|---|
+| `setupMs` | Builder setup here; the first call includes the prover key download |
+| `proveMs` | Building, proving and signing the call here |
+| `queueMs` | Waiting in the sponsor's queue |
+| `sponsorMs` | The sponsor adds the fee and broadcasts |
+| `settleMs` | From the broadcast until the block is final |
+
+`anchor_document` with a content root returns the anchor's stages as
+`anchorTimings`.
 
 ## Sandbox vaults
 

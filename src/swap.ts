@@ -10,6 +10,7 @@ import { dirname } from 'node:path';
 import type { NightgateMcpConfig } from './config.js';
 import { txExport } from './tx-module.js';
 import { ensureSeed } from './seed.js';
+import { setStage } from './jobs.js';
 
 export interface SwapLeg {
   tokenType: string;
@@ -230,7 +231,9 @@ export interface BuiltOffer {
 /** One half of a swap from this wallet; bound with its offer file unless `bind` is false. */
 export async function buildOffer(config: NightgateMcpConfig, input: { give: SwapLeg; want: SwapLeg; bind?: boolean }): Promise<BuiltOffer> {
   const t0 = Date.now();
+  setStage('syncing the wallet');
   const wallet = await syncedWallet(config, SYNC_WAIT_MS);
+  setStage('proving');
   const half = await wallet.buildHalf({ give: input.give, want: input.want, bind: input.bind !== false });
   const terms = termsOut(half.terms);
   const id = halfId(half.halfB64);
@@ -254,7 +257,9 @@ export interface TakenOfferOut {
 /** The mirror half of an offer from this wallet, after its terms were read and compared with `expect`. */
 export async function takeOffer(config: NightgateMcpConfig, input: { offer: string; expect?: { gives: SwapLeg; wants: SwapLeg } }): Promise<TakenOfferOut> {
   const t0 = Date.now();
+  setStage('syncing the wallet');
   const wallet = await syncedWallet(config, SYNC_WAIT_MS);
+  setStage('proving');
   const taken = await wallet.takeOffer({ offer: input.offer, ...(input.expect ? { expect: input.expect } : {}) });
   const terms = termsOut(taken.terms);
   const id = halfId(taken.takerHalfB64);

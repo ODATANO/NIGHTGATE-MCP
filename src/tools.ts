@@ -10,7 +10,7 @@ import {
 } from './swap.js';
 import { buildMint } from './factory.js';
 import { resolveTxSource } from './built.js';
-import { awaitJob, forgetStart, jobSession, startOnce, type JobCheck, type ToolExtra } from './jobs.js';
+import { awaitJob, callStage, forgetStart, jobSession, setStage, startOnce, type JobCheck, type ToolExtra } from './jobs.js';
 import { seedCreated, seedNotice } from './seed.js';
 
 const HEX64 = /^[0-9a-fA-F]{64}$/;
@@ -354,8 +354,12 @@ export function registerTools(server: McpServer, client: NightgateClient, config
     const started = await startOnce(key, async () => {
       const built = await buildSponsorable(config, { ...input, bind: false });
       const { b64 } = await resolveTxSource({ txId: built.txId }, 'unboundTxB64');
+      setStage('handing over to the sponsor');
       const job = await client.callAction('sponsorUnboundTransaction', { unboundTxB64: b64, idempotencyKey }) as Record<string, unknown>;
-      return { ...job, attesterId: built.attesterId, contractAddress: input.contractAddress, buildMs: built.buildMs };
+      return {
+        ...job, attesterId: built.attesterId, contractAddress: input.contractAddress, buildMs: built.buildMs,
+        timings: { setupMs: built.setupMs, proveMs: built.proveMs },
+      };
     });
     const job = await awaitJob(client, config, started, extra, checkFor(input, String(started.attesterId)));
     if (job.status === 'failed') forgetStart(key);
@@ -373,7 +377,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         'document yourself. With contentRoot and schemaId from prepare_document_proof it also ' +
         'anchors the content root, which the field claims of submit_vault_call need. Returns ' +
         '{ status, attesterId, payloadHash, contractAddress, metadataJson, txHash, transactionHash, ' +
-        'check }; check is the verify_attestation call that shows the record on-chain. ' + RETRY_HINT,
+        'timings, check }; check is the verify_attestation call that shows the record on-chain. ' + RETRY_HINT,
       inputSchema: {
         sha256: hex64('sha256').describe('sha256 of the document (64 hex); it becomes the payloadHash'),
         metadata: z.record(z.unknown()).optional()
@@ -406,7 +410,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
       const root = await submitVaultCall(
         { contractAddress, call: 'anchorContentRoot', params: { payloadHash, contentRoot: args.contentRoot, schemaId: args.schemaId }, compiledArtifactRef: ref },
         args.idempotencyKey && `${args.idempotencyKey}:root`, extra);
-      return { ...root, payloadHash, metadataJson, anchorTxHash: anchor.txHash };
+      return { ...root, payloadHash, metadataJson, anchorTxHash: anchor.txHash, anchorTimings: anchor.timings };
     }),
   );
 
@@ -421,7 +425,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         '(proveFieldsUnchangedExcept, proveFieldsDiffer), disclosure (grantDisclosure, ' +
         'revokeDisclosure), passports and anchoring. The witness from prepare_document_proof is ' +
         'used here and never sent. Returns { status, attesterId, contractAddress, txHash, ' +
-        'transactionHash, check }; check is the free verify call that shows the effect on-chain. ' +
+        'transactionHash, timings, check }; check is the free verify call that shows the effect on-chain. ' +
         'A failed job says in `next` what to do. ' + RETRY_HINT,
       inputSchema: {
         contractAddress: CONTRACT,
@@ -1027,9 +1031,10 @@ export function wrapHandler(_client: NightgateClient) {
   return function run<A>(fn: (args: A, extra: ToolExtra) => Promise<unknown>) {
     return async (args: A, extra: ToolExtra): Promise<ToolResult> => {
       const notice: { createdFile?: string } = {};
-      const stopProgress = startProgress(extra);
+      const stage: { stage?: string } = {};
+      const stopProgress = startProgress(extra, stage);
       try {
-        const result = await seedNotice.run(notice, () => fn(args, extra));
+        const result = await callStage.run(stage, () => seedNotice.run(notice, () => fn(args, extra)));
         const seed = notice.createdFile ? seedCreated(notice.createdFile) : undefined;
         const out = seed && result && typeof result === 'object' && !Array.isArray(result) ? { ...result, seed } : result;
         return { content: [{ type: 'text', text: JSON.stringify(out, null, 2) }] };
@@ -1049,7 +1054,7 @@ export function wrapHandler(_client: NightgateClient) {
 }
 
 /** Progress every 5 s while a call runs, when the client asked for it with a progress token. */
-function startProgress(extra: ToolExtra | undefined): () => void {
+function startProgress(extra: ToolExtra | undefined, stage: { stage?: string }): () => void {
   const token = extra?._meta?.progressToken;
   if (token === undefined || !extra) return () => {};
   const t0 = Date.now();
@@ -1057,7 +1062,7 @@ function startProgress(extra: ToolExtra | undefined): () => void {
   const timer = setInterval(() => {
     extra.sendNotification({
       method: 'notifications/progress',
-      params: { progressToken: token, progress: ++n, message: `working, ${Math.round((Date.now() - t0) / 1000)} s` },
+      params: { progressToken: token, progress: ++n, message: `${stage.stage ?? 'working'}, ${Math.round((Date.now() - t0) / 1000)} s` },
     }).catch(() => undefined);
   }, 5_000);
   timer.unref?.();
