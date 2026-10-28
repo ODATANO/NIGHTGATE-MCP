@@ -20,6 +20,7 @@ const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 
 const A = 'a1'.repeat(32);
 const B = 'b2'.repeat(32);
+const C = 'c3'.repeat(32);
 const POOL = '00000000-0000-0000-0000-706f6f6c0000';
 const JOB = '11111111-2222-4333-8444-555555555555';
 const OFFER = `swapoffer1${'q'.repeat(60)}`;
@@ -45,7 +46,8 @@ const wallet = {
   maxInputs: 4, provingMode: 'wasm',
   sync: async () => {},
   coins: async () => [{ tokenType: A, amount: 700n }, { tokenType: A, amount: 300n }, { tokenType: B, amount: 900n }],
-  spendable: async (tokenType) => (tokenType === A ? 1000n : 900n),
+  spendable: async (tokenType) => (tokenType === A ? 1000n : tokenType === B ? 900n : 0n),
+  pendingBalances: async () => (halfCount ? { [A]: 1355n, [C]: 145n } : {}),
   buildHalf: async ({ give, want, bind = true }) => { calls.built.push({ give, want, bind }); return halfOf(give, want, bind); },
   takeOffer: async ({ offer, expect }) => {
     if (expect && (String(expect.gives.amount) !== '1000' || expect.gives.tokenType !== A)) {
@@ -116,8 +118,8 @@ try {
   let w = await mcp.call('get_swap_wallet');
   if (w.isError || w.value.synced !== true) fail(`get_swap_wallet: ${w.text.slice(0, 300)}`);
   const wantTokens = [
-    { tokenType: A, balance: '1000', coins: 2, spendable: '1000' },
-    { tokenType: B, balance: '900', coins: 1, spendable: '900' },
+    { tokenType: A, balance: '1000', coins: 2, spendable: '1000', pending: '0' },
+    { tokenType: B, balance: '900', coins: 1, spendable: '900', pending: '0' },
   ];
   if (!same(w.value.tokens, wantTokens)) fail(`get_swap_wallet tokens: ${JSON.stringify(w.value.tokens)}`);
   if (w.value.maxInputs !== 4 || w.value.address !== wallet.address || w.value.pendingHalves.length !== 0) fail(`get_swap_wallet: ${w.text.slice(0, 300)}`);
@@ -137,6 +139,14 @@ try {
   if (!same(calls.built[0], { give: { tokenType: A, amount: '1000' }, want: { tokenType: B, amount: '300' }, bind: true })) fail(`buildHalf input: ${JSON.stringify(calls.built[0])}`);
   if ((await readFile(stateFile, 'utf8')) !== 'state-after-1-halves') fail('the wallet state was not written after the build');
   console.log('OK: build_swap_offer returns the offer file, its id and the terms as decimal strings');
+  w = await mcp.call('get_swap_wallet');
+  const wantPending = [
+    { tokenType: A, balance: '1000', coins: 2, spendable: '1000', pending: '1355' },
+    { tokenType: B, balance: '900', coins: 1, spendable: '900', pending: '0' },
+    { tokenType: C, balance: '0', coins: 0, spendable: '0', pending: '145' },
+  ];
+  if (!same(w.value.tokens, wantPending)) fail(`get_swap_wallet pending: ${JSON.stringify(w.value.tokens)}`);
+  console.log('OK: get_swap_wallet carries pending per token type, a token only pending gets its own row');
 
   const read = await mcp.call('read_swap_offer', { offer: built.value.offer });
   if (read.isError || read.value.bound !== true || read.value.gives.amount !== '1000' || read.value.wants.tokenType !== B || read.value.serializedBytes !== 15477) fail(`read_swap_offer: ${read.text.slice(0, 300)}`);

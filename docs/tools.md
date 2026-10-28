@@ -138,8 +138,12 @@ one half, the halves mirror each other, a sponsor merges them and pays the fee.
 Needs a Midnight indexer the swap wallet syncs its coins from
 (`NIGHTGATE_INDEXER_HTTP_URL`, `NIGHTGATE_INDEXER_WS_URL`).
 
-1. `get_swap_wallet`: balance, free coins and `spendable` per token type. The
-   first call starts the sync of the shielded coins (about 5 minutes from
+1. `get_swap_wallet`: per token type the balance of the free coins, their
+   number, `spendable` and `pending`, what the halves built here bring back
+   once their swaps land (the change and the wanted coins). While a half can
+   still land the wallet is worth balance plus pending; a half can give only
+   from balance, and `revert_swap_offer` moves a dropped half back into it.
+   The first call starts the sync of the shielded coins (about 5 minutes from
    genesis, seconds with `NIGHTGATE_SWAP_STATE_FILE`). With offers posted from
    this server it reads their state in one `listSwapOffers` call.
 2. Maker: `build_swap_offer` with `give` and `want` returns the offer file

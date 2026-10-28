@@ -273,7 +273,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         '(scaled values / digests / salts): treat as sensitive. Store canonicalDocument at your ' +
         'storageRef; re-serializing with different key order will not re-hash equal.',
       inputSchema: {
-        document: z.record(z.unknown())
+        document: z.record(z.string(), z.unknown())
           .describe('The full document as a JSON object; all of it goes into payloadHash'),
         proofFields: z.array(z.object({
           field: z.string().min(1)
@@ -380,7 +380,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         'timings, check }; check is the verify_attestation call that shows the record on-chain. ' + RETRY_HINT,
       inputSchema: {
         sha256: hex64('sha256').describe('sha256 of the document (64 hex); it becomes the payloadHash'),
-        metadata: z.record(z.unknown()).optional()
+        metadata: z.record(z.string(), z.unknown()).optional()
           .describe('Public metadata; its sha256 is anchored with the hash. Default none'),
         contentRoot: hex64('contentRoot').optional().describe('Content root from prepare_document_proof (64 hex); needs schemaId'),
         schemaId: hex64('schemaId').optional().describe('Schema id from prepare_document_proof (64 hex); needs contentRoot'),
@@ -430,11 +430,11 @@ export function registerTools(server: McpServer, client: NightgateClient, config
       inputSchema: {
         contractAddress: CONTRACT,
         call: z.enum(BUILDABLE_CALLS).describe('Which circuit to call'),
-        params: z.record(z.union([z.string(), z.number()]))
+        params: z.record(z.string(), z.union([z.string(), z.number()]))
           .describe('The call parameters, listed per call in build_sponsorable_transaction'),
-        merkleProof: z.record(z.any()).optional()
+        merkleProof: z.record(z.string(), z.any()).optional()
           .describe('WITNESS for the proveField* calls, as prepare_document_proof returns it for that field'),
-        docPair: z.record(z.any()).optional()
+        docPair: z.record(z.string(), z.any()).optional()
           .describe('WITNESS { schema, openingA, openingB } for proveFieldsUnchangedExcept and proveFieldsDiffer'),
         compiledArtifactRef: z.enum(BUILDABLE_ARTIFACTS).optional()
           .describe("Vault lineage, default 'attestation-vault-32' (the sandbox vaults); 'attestation-vault' for a 16-slot vault"),
@@ -483,11 +483,11 @@ export function registerTools(server: McpServer, client: NightgateClient, config
       inputSchema: {
         contractAddress: CONTRACT,
         call: z.enum(BUILDABLE_CALLS).describe('Which circuit to call'),
-        params: z.record(z.union([z.string(), z.number()]))
+        params: z.record(z.string(), z.union([z.string(), z.number()]))
           .describe('The call parameters (see the per-call list in the description)'),
-        merkleProof: z.record(z.any()).optional()
+        merkleProof: z.record(z.string(), z.any()).optional()
           .describe('WITNESS material for the proveField* calls, as prepare_document_proof returns it for that field (fieldValue/fieldDigest, fieldSalt, siblings, dirs, setProof). It is consumed by the local prover and never sent to NIGHTGATE'),
-        docPair: z.record(z.any()).optional()
+        docPair: z.record(z.string(), z.any()).optional()
           .describe('WITNESS bundle { schema, openingA, openingB } for proveFieldsUnchangedExcept / proveFieldsDiffer; both documents must be prepared with the same ordered field list'),
         bind: z.boolean().optional()
           .describe('false (default): unbound for sponsor_unbound_transaction; true: finalized for sponsor_finalized_transaction'),
@@ -588,8 +588,11 @@ export function registerTools(server: McpServer, client: NightgateClient, config
     {
       description:
         'The shielded wallet this MCP server swaps from (the caller seed): address, ' +
-        'public keys, and per token type the balance, the number of free coins and `spendable`, ' +
-        'the most ONE swap half can give (what its largest coins hold, up to maxInputs coins). ' +
+        'public keys, and per token type the balance of the free coins, their number, `spendable`, ' +
+        'the most ONE swap half can give (what its largest coins hold, up to maxInputs coins), and ' +
+        '`pending`, what the halves built here bring back once their swaps land (the change and the ' +
+        'wanted coins). While a half can still land the wallet is worth balance plus pending; a half ' +
+        'can give only from balance, and revert_swap_offer moves a dropped half back into it. ' +
         'Also lists the halves built here that are not handed over yet; one posted with ' +
         'post_swap_offer carries offerId and boardStatus and leaves the list once its offer filled. The wallet syncs its ' +
         'shielded coins only; a first sync from genesis takes about 5 minutes, during which the ' +
@@ -823,7 +826,9 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         'Offers on the server\'s board. Without status: the open ones, newest first. status filled | ' +
         'retired | expired | all reads the closed ones instead, ordered by last change; since keeps ' +
         'offers changed after that instant, so status all + since polled repeatedly is the board\'s ' +
-        'change feed. Filters are exact 64-hex token types and one tag. ' + BOARD_ROW_HINT +
+        'change feed. With waitMs the server holds an empty answer until an offer matches or the ' +
+        'time is up, so a watcher makes one call per change instead of one per interval. ' +
+        'Filters are exact 64-hex token types and one tag. ' + BOARD_ROW_HINT +
         ' Every token may read the board.',
       inputSchema: {
         givesType: hex64('givesType').optional().describe('Only offers that give this token type'),
@@ -832,6 +837,8 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         limit: z.number().int().min(1).max(200).optional().describe('Default 50'),
         status: OFFER_STATUS.optional().describe('Default open'),
         since: z.string().datetime().optional().describe('ISO timestamp; only offers changed after it'),
+        waitMs: z.number().int().min(0).max(BOARD_WAIT_MAX_MS).optional()
+          .describe('Hold the call while nothing matches, up to this many ms (at most 25000); needs NIGHTGATE 0.38.0'),
       },
     },
     run(async (args) => settled(await listOffers(client, { ...args, mine: null }))),
@@ -843,15 +850,18 @@ export function registerTools(server: McpServer, client: NightgateClient, config
       description:
         'The offers this caller posted on the board (a token: its grant\'s), open and closed, ' +
         'ordered by last change: what is still open, what filled (filledTxHash), what expired or ' +
-        'was retired. status narrows to one state, since to offers changed after an instant. ' +
+        'was retired. status narrows to one state, since to offers changed after an instant, ' +
+        'waitMs holds an empty answer until one of them changes. ' +
         BOARD_ROW_HINT,
       inputSchema: {
         status: OFFER_STATUS.optional().describe('Default all'),
         since: z.string().datetime().optional().describe('ISO timestamp; only offers changed after it'),
         limit: z.number().int().min(1).max(200).optional().describe('Default 50'),
+        waitMs: z.number().int().min(0).max(BOARD_WAIT_MAX_MS).optional()
+          .describe('Hold the call while nothing matches, up to this many ms (at most 25000); needs NIGHTGATE 0.38.0'),
       },
     },
-    run(async (args) => settled(await listOffers(client, { status: args.status ?? 'all', since: args.since, limit: args.limit, mine: true }))),
+    run(async (args) => settled(await listOffers(client, { status: args.status ?? 'all', since: args.since, limit: args.limit, mine: true, waitMs: args.waitMs }))),
   );
 
   server.registerTool(
@@ -1007,9 +1017,15 @@ function settled<T>(rows: T): T {
   return rows;
 }
 
-/** listSwapOffers wants all seven parameters, null for the unused ones. */
+/** The board's long-poll cap: NIGHTGATE holds an empty answer at most this long. */
+const BOARD_WAIT_MAX_MS = 25_000;
+
+/**
+ * listSwapOffers with the seven parameters, null for the unused ones. `waitMs` is sent only
+ * when set: a server before NIGHTGATE 0.38.0 refuses a parameter it does not declare.
+ */
 function listOffers(client: NightgateClient, args: {
-  givesType?: string; wantsType?: string; tag?: string; limit?: number; status?: string; since?: string; mine: boolean | null;
+  givesType?: string; wantsType?: string; tag?: string; limit?: number; status?: string; since?: string; mine: boolean | null; waitMs?: number;
 }): Promise<unknown> {
   return client.callFunction('listSwapOffers', {
     givesType: args.givesType?.toLowerCase() ?? null,
@@ -1019,6 +1035,7 @@ function listOffers(client: NightgateClient, args: {
     status: args.status ?? null,
     since: args.since ?? null,
     mine: args.mine,
+    ...(args.waitMs === undefined ? {} : { waitMs: args.waitMs }),
   });
 }
 

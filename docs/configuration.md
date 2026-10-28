@@ -43,8 +43,9 @@ sponsored call.
 ## Compatibility
 
 NIGHTGATE >= 0.36.0; from 0.37.0 the server holds each status read until the
-job settles; an older server is asked every few seconds. The hosted gateway
-runs 0.37.0. `@odatano/nightgate-tx`
+job settles; an older server is asked every few seconds. From 0.38.0
+`list_swap_offers` and `my_swap_offers` take `waitMs`; an older server gets no
+`waitMs` sent and answers at once. The hosted gateway runs 0.37.2. `@odatano/nightgate-tx`
 comes with the package; minting also needs `@odatano/contract-token-factory`
 next to it. The free state reads need `NIGHTGATE_PUBLIC_VERIFY=true` on an own
 instance that is reached without credentials. What an older server lacks per version:

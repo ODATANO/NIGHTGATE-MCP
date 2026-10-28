@@ -202,14 +202,19 @@ export async function swapWalletInfo(config: NightgateMcpConfig): Promise<Record
     if (!entry.isSynced) return { ...base, syncingSeconds: Math.round((Date.now() - entry.startedAt) / 1000) };
   }
   const coins: Array<{ tokenType: string; amount: bigint }> = await wallet.coins();
-  const byType = new Map<string, { balance: bigint; coins: number }>();
+  const pendingByType: Record<string, bigint> = await wallet.pendingBalances();
+  const byType = new Map<string, { balance: bigint; coins: number; pending: bigint }>();
   for (const c of coins) {
-    const t = byType.get(c.tokenType) ?? { balance: 0n, coins: 0 };
-    byType.set(c.tokenType, { balance: t.balance + c.amount, coins: t.coins + 1 });
+    const t = byType.get(c.tokenType) ?? { balance: 0n, coins: 0, pending: 0n };
+    byType.set(c.tokenType, { ...t, balance: t.balance + c.amount, coins: t.coins + 1 });
+  }
+  for (const [tokenType, pending] of Object.entries(pendingByType)) {
+    const t = byType.get(tokenType) ?? { balance: 0n, coins: 0, pending: 0n };
+    byType.set(tokenType, { ...t, pending: t.pending + pending });
   }
   const tokens = [];
   for (const [tokenType, t] of byType) {
-    tokens.push({ tokenType, balance: t.balance.toString(), coins: t.coins, spendable: String(await wallet.spendable(tokenType)) });
+    tokens.push({ tokenType, balance: t.balance.toString(), coins: t.coins, spendable: String(await wallet.spendable(tokenType)), pending: t.pending.toString() });
   }
   const pendingHalves = [...pending.entries()].map(([id, p]) => ({
     id, role: p.role, ...(p.jobId ? { jobId: p.jobId } : {}),

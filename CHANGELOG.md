@@ -7,6 +7,29 @@ The README says which NIGHTGATE the current version needs.
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-10-28
+
+Needs NIGHTGATE 0.36.0; `waitMs` needs 0.38.0.
+
+### Added
+
+- **The board waits.** `list_swap_offers` and `my_swap_offers` take `waitMs`
+  (up to 25000): the server holds an empty answer until an offer matches or
+  the time is up, so a watcher with `status: 'all'` and `since` makes one
+  call per change instead of one per interval. Sent only when set, so an
+  older server answers as before.
+- **The wallet reports what is pending.** Each token row of `get_swap_wallet`
+  carries `pending`, what the halves built here bring back once their swaps
+  land (the change and the wanted coins). `balance` stays the free coins: a
+  half can give only from `balance`, and while it can still land the wallet
+  is worth `balance` plus `pending`. Needs `@odatano/nightgate-tx` 0.16.0,
+  which comes with the package.
+
+### Changed
+
+- `zod` 4 and `@modelcontextprotocol/sdk` 1.32: the tool schemas are
+  unchanged for callers; the install carries no known vulnerable package.
+
 ## [0.18.3] - 2026-10-27
 
 Needs NIGHTGATE 0.36.0.
