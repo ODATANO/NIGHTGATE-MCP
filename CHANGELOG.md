@@ -7,6 +7,31 @@ The README says which NIGHTGATE the current version needs.
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-10-28
+
+Needs NIGHTGATE 0.36.0; `send_token`, directed offers and receipts need 0.39.0.
+
+### Added
+
+- **`send_token`.** A sponsored transfer of a shielded token from this wallet
+  to another shielded address: built and proven here from the wallet's coins,
+  handed to `sponsorTransfer`, the sponsor pays. The recipient needs nothing
+  but its address. Needs `sponsorTransfer` in the grant and `@odatano/nightgate-tx`
+  0.17.0, which comes with the package.
+- **`burn_token`.** Burns an amount of a factory token this wallet holds;
+  `issuerKey` names a token another issuer minted.
+- **`call_contract`.** A circuit call on any contract whose lineage package is
+  installed next to the server, with tagged arguments (`$bytes`, `$uint`,
+  `$coin` for a shielded coin funded from this wallet), built here and
+  sponsored.
+- **Directed offers.** `post_swap_offer` with `directed: true` returns a
+  `takerSecret`, shown once; `take_swap_offer` and `sponsor_swap` take
+  `takerSecret`, and the sponsor refuses the swap without it. Board rows carry
+  `directed`.
+- **Receipts.** A landed swap or transfer carries `receipt` in its result:
+  the instance's Ed25519 statement of the chain facts and the terms, checkable
+  against the key the indexer service publishes under `getReceiptKey()`.
+
 ## [0.19.0] - 2026-10-28
 
 Needs NIGHTGATE 0.36.0; `waitMs` needs 0.38.0.

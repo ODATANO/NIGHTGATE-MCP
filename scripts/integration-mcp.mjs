@@ -41,6 +41,9 @@ const EXPECTED_TOOLS = [
   'get_board_status',
   'retire_swap_offer',
   'mint_token',
+  'burn_token',
+  'send_token',
+  'call_contract',
   'get_usage',
 ];
 // No tool takes a server wallet session any more.

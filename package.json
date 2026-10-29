@@ -1,6 +1,6 @@
 {
   "name": "@odatano/nightgate-mcp",
-  "version": "0.19.0",
+  "version": "0.20.0",
   "description": "MCP server exposing NIGHTGATE (Midnight blockchain attestation layer) to AI agents",
   "license": "Apache-2.0",
   "publishConfig": {
@@ -47,7 +47,7 @@
   ],
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
-    "@odatano/nightgate-tx": "^0.16.0",
+    "@odatano/nightgate-tx": "^0.17.0",
     "zod": "^4.6.7"
   },
   "peerDependencies": {

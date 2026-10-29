@@ -5,10 +5,12 @@ import { int64, raw, NightgateApiError, NightgateClient } from './client.js';
 import { isGatewayKey, vaultOf, type NightgateMcpConfig } from './config.js';
 import { BUILDABLE_CALLS, BUILDABLE_ARTIFACTS, DEFAULT_ARTIFACT, buildSponsorable, attesterIdentity, type BuildInput } from './builder.js';
 import {
-  buildOffer, earliestPostedAt, halfJobIds, postedOfferIds, readOffer, revertHalf, sameOffer, settleBoardRows, settleHalfJob, swapWalletInfo, takenHalves,
+  buildOffer, buildTransfer, earliestPostedAt, halfJobIds, postedOfferIds, readOffer, revertHalf, sameOffer, settleBoardRows, settleHalfJob, swapWalletInfo, takenHalves,
   takeOffer, trackHalfJob, trackPostedHalf,
 } from './swap.js';
-import { buildMint } from './factory.js';
+import { buildBurn, buildMint } from './factory.js';
+import { buildContractCall } from './contract-call.js';
+import { randomBytes } from 'node:crypto';
 import { resolveTxSource } from './built.js';
 import { awaitJob, callStage, forgetStart, jobSession, setStage, startOnce, type JobCheck, type ToolExtra } from './jobs.js';
 import { seedCreated, seedNotice } from './seed.js';
@@ -680,6 +682,8 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         idempotencyKey: z.string().optional().describe('Dedupes retries of the same submission'),
         offerId: z.string().uuid().optional()
           .describe('The board entry the offer came from (list_swap_offers), so the fill is recorded against it'),
+        takerSecret: z.string().min(1).max(256).optional()
+          .describe('For a directed offer (directed: true on the board): the secret its poster handed you; the sponsor refuses the swap without it'),
       },
     },
     run(async (args, extra) => {
@@ -707,6 +711,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
             ...(args.offerId ? { offerId: args.offerId } : { makerHalfB64: taken.makerHalfB64 }),
             takerHalfB64: taken.takerHalfB64,
             idempotencyKey: args.idempotencyKey,
+            ...(args.takerSecret ? { takerSecret: args.takerSecret } : {}),
           }) as Record<string, unknown>;
         } catch (err) {
           if (!(err instanceof NightgateApiError)) throw err;
@@ -764,6 +769,8 @@ export function registerTools(server: McpServer, client: NightgateClient, config
           .describe('Id of the half this server built for the swap: alone it names a taken offer, next to both halves it ties the job to the half'),
         offerId: z.string().uuid().optional()
           .describe('An offer on the server\'s board (list_swap_offers): the server takes the maker half from there; pass takerHalf or the halfId of the taken offer with it'),
+        takerSecret: z.string().min(1).max(256).optional()
+          .describe('For a directed board offer: the secret its poster handed you'),
       },
     },
     run(async (args, extra) => {
@@ -782,7 +789,9 @@ export function registerTools(server: McpServer, client: NightgateClient, config
       }
       const key = callKey('sponsorSwap', halves);
       const started = await startOnce(key, async () => {
-        const job = await client.callAction('sponsorSwap', { ...halves, idempotencyKey: args.idempotencyKey }) as Record<string, unknown>;
+        const job = await client.callAction('sponsorSwap', {
+          ...halves, idempotencyKey: args.idempotencyKey, ...(args.takerSecret ? { takerSecret: args.takerSecret } : {}),
+        }) as Record<string, unknown>;
         if (args.halfId) trackHalfJob(args.halfId, job?.jobId);
         return job;
       });
@@ -801,21 +810,27 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         'would sponsor (one token type given, one wanted, both on its list, never NIGHT) and ' +
         'records its terms; the half itself stays signed by the maker. The offer closes when a ' +
         'swap that spends one of its inputs lands, on expiry, or by retire_swap_offer. Needs ' +
-        'postSwapOffer in an agent grant\'s allowedActions. Returns { offerId, status, terms }.',
+        'postSwapOffer in an agent grant\'s allowedActions. Returns { offerId, status, terms }. ' +
+        'With directed: true only a taker who knows the returned takerSecret can have the swap ' +
+        'sponsored: hand that secret to your counterparty, it is shown once (needs NIGHTGATE 0.39.0).',
       inputSchema: {
         offer: swapHalf('The maker half, as offer file text or base64'),
         expiresAt: z.string().datetime().optional().describe('ISO timestamp; at most 90 days ahead'),
         tags: z.array(z.string().min(1).max(40)).max(8).optional().describe('Up to 8 tags for list_swap_offers'),
+        directed: z.boolean().optional()
+          .describe('true: the offer can only be taken with the takerSecret this call returns; for an invoice or an agreed OTC deal'),
       },
     },
     run(async (args) => {
+      const takerSecret = args.directed ? randomBytes(32).toString('hex') : undefined;
       const posted = await client.callAction('postSwapOffer', {
         offer: args.offer,
         expiresAt: args.expiresAt,
         tags: args.tags,
+        ...(takerSecret ? { takerSecretHash: createHash('sha256').update(takerSecret, 'utf8').digest('hex') } : {}),
       }) as Record<string, unknown> | undefined;
       await trackPostedHalf(args.offer, posted?.offerId).catch(() => { /* posted; the half is just not tied to it */ });
-      return posted;
+      return takerSecret ? { ...posted, takerSecret } : posted;
     }),
   );
 
@@ -973,6 +988,124 @@ export function registerTools(server: McpServer, client: NightgateClient, config
       return job;
     }),
   );
+
+  server.registerTool(
+    'burn_token',
+    {
+      description:
+        'Burn an amount of a factory token this wallet holds: the coins leave circulation and the ' +
+        'factory\'s supply ledger drops. Built, proven and signed here, a sponsor pays; the factory ' +
+        'has to be on the sponsor\'s contract list and burn on its circuit list. Names the token ' +
+        'by its name and issuer: without issuerKey the token is one this wallet minted. ' + WAIT_HINT,
+      inputSchema: {
+        contractAddress: hex64('contractAddress').describe('The token-factory deployment the token was minted on'),
+        name: z.string().min(1).refine((s) => Buffer.byteLength(s, 'utf8') <= 32, 'name must be at most 32 UTF-8 bytes')
+          .describe('Token name, at most 32 UTF-8 bytes'),
+        amount: z.union([
+          z.string().regex(/^[1-9]\d*$/, 'amount must be a positive integer (decimal string)'),
+          z.number().int().positive().safe(),
+        ]).describe('Atoms to burn; a decimal string is exact'),
+        issuerKey: hex64('issuerKey').optional().describe('The issuer of the token (64 hex, from mint_token); default this wallet\'s own issuer'),
+        idempotencyKey: z.string().optional().describe('Dedupes retries'),
+      },
+    },
+    run(async (args, extra) => {
+      if (!config) throw new Error('local burning is not configured for this server instance');
+      const input = { contractAddress: args.contractAddress, name: args.name, amount: String(args.amount), issuerKey: args.issuerKey };
+      const key = callKey('burnToken', input);
+      const started = await startOnce(key, async () => {
+        const { unboundTxB64, ...built } = await buildBurn(config, input);
+        const job = await client.callAction('sponsorUnboundTransaction', { unboundTxB64, idempotencyKey: args.idempotencyKey }) as Record<string, unknown>;
+        return { ...built, ...job };
+      });
+      const job = await awaitJob(client, config, started, extra, { tool: 'get_swap_wallet', args: {} });
+      if (job.status === 'failed') forgetStart(key);
+      return job;
+    }),
+  );
+
+  server.registerTool(
+    'send_token',
+    {
+      description:
+        'Send an amount of a shielded token from this wallet to another shielded address, with the ' +
+        'sponsor paying the fee: a payout, a salary, an invoice settlement. The transfer is built and ' +
+        'proven here from the wallet\'s coins (at most maxInputs of them); only the fee-unpaid bytes go ' +
+        'to the server, which records the declared type and amount and submits. The recipient needs ' +
+        'nothing but its address. Needs sponsorTransfer in the grant, the type on the sponsor\'s list ' +
+        'and NIGHTGATE 0.39.0. A landed transfer carries a receipt signed by the instance. ' + WAIT_HINT,
+      inputSchema: {
+        tokenType: hex64('tokenType').describe('Raw token type (64 hex), what derive_token_type or mint_token returns'),
+        amount: z.union([
+          z.string().regex(/^[1-9]\d*$/, 'amount must be a positive integer (decimal string)'),
+          z.number().int().positive().safe(),
+        ]).describe('Atoms to send; a decimal string is exact'),
+        to: z.string().min(16).describe('The recipient\'s shielded address (mn_shield-addr_...), as its get_attester_identity or get_swap_wallet shows it'),
+        idempotencyKey: z.string().optional().describe('Dedupes retries'),
+      },
+    },
+    run(async (args, extra) => {
+      if (!config) throw new Error('transfers are not configured for this server instance');
+      const input = { tokenType: args.tokenType.toLowerCase(), amount: String(args.amount), to: args.to.trim() };
+      const key = callKey('sendToken', input);
+      const started = await startOnce(key, async () => {
+        const built = await buildTransfer(config, input);
+        let job: Record<string, unknown>;
+        try {
+          setStage('handing over to the sponsor');
+          job = await client.callAction('sponsorTransfer', {
+            transferTxB64: built.transferTxB64, tokenType: input.tokenType, amount: input.amount, idempotencyKey: args.idempotencyKey,
+          }) as Record<string, unknown>;
+        } catch (err) {
+          if (!(err instanceof NightgateApiError)) throw err;
+          throw new NightgateApiError(err.status, err.code, err.message, { ...(err.detail ?? {}), halfId: built.id });
+        }
+        trackHalfJob(built.id, job.jobId);
+        return { ...job, id: built.id, terms: built.terms, inputs: built.inputs, buildMs: built.buildMs };
+      });
+      const job = await awaitJob(client, config, started, extra, { tool: 'get_swap_wallet', args: {} });
+      if (typeof started.jobId === 'string') settleHalfJob(started.jobId, job.status);
+      if (job.status === 'failed') forgetStart(key);
+      return job;
+    }),
+  );
+
+  server.registerTool(
+    'call_contract',
+    {
+      description:
+        'Call a circuit on any contract whose lineage package is installed next to this server ' +
+        '(laid out like @odatano/contract-<name>: contract.json, the compiled class, the proving files). ' +
+        'The call is built, proven and signed here from the caller seed and a sponsor pays, so the caller ' +
+        'holds neither NIGHT nor DUST. Arguments are JSON in circuit order; tagged values: {"$bytes":"<hex>"}, ' +
+        '{"$uint":"<n>"}, and {"$coin":{"tokenType","amount"}} for a shielded coin the circuit receives, ' +
+        'funded from this wallet (needs NIGHTGATE_INDEXER_HTTP_URL and _WS_URL so the coins sync). ' +
+        'Circuits that need witnesses beyond the contract\'s own are not reachable here. The contract has ' +
+        'to be sponsorable (its address and circuit on the sponsor\'s policy). ' + WAIT_HINT,
+      inputSchema: {
+        package: z.string().min(1).max(214).describe('The installed lineage package, for example @meridian/contract-m402'),
+        contractAddress: hex64('contractAddress').describe('The deployment to call'),
+        circuit: z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/, 'circuit must be a circuit name').describe('The circuit to call'),
+        args: z.array(z.unknown()).max(32).optional().describe('Circuit arguments in order, with the tagged values described above'),
+        idempotencyKey: z.string().optional().describe('Dedupes retries'),
+      },
+    },
+    run(async (args, extra) => {
+      if (!config) throw new Error('local building is not configured for this server instance');
+      const input = { package: args.package, contractAddress: args.contractAddress.toLowerCase(), circuit: args.circuit, args: args.args ?? [] };
+      const key = callKey('callContract', input);
+      const started = await startOnce(key, async () => {
+        const { unboundTxB64, ...built } = await buildContractCall(config, input);
+        setStage('handing over to the sponsor');
+        const job = await client.callAction('sponsorUnboundTransaction', { unboundTxB64, idempotencyKey: args.idempotencyKey }) as Record<string, unknown>;
+        return { ...job, contractAddress: input.contractAddress, circuit: input.circuit, coins: built.coins, buildMs: built.buildMs, timings: { setupMs: built.setupMs, proveMs: built.proveMs } };
+      });
+      const job = await awaitJob(client, config, started, extra);
+      if (job.status === 'failed') forgetStart(key);
+      return job;
+    }),
+  );
+
   server.registerTool(
     'get_usage',
     {

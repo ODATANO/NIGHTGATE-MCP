@@ -82,8 +82,8 @@ interface OpenWallet {
 let open: Promise<OpenWallet> | undefined;
 interface PendingHalf {
   revert: () => Promise<void>;
-  terms: SwapTermsOut;
-  role: 'maker' | 'taker';
+  terms: SwapTermsOut | TransferTermsOut;
+  role: 'maker' | 'taker' | 'transfer';
   /** Both halves of a taken offer, so it can be submitted by id. */
   halves?: { makerHalfB64: string; takerHalfB64: string };
   /** The sponsor job the half went into. */
@@ -248,6 +248,40 @@ export async function buildOffer(config: NightgateMcpConfig, input: { give: Swap
     id, ...(half.offer ? { offer: half.offer } : {}), halfB64: half.halfB64, bound: half.bound === true,
     serializedBytes: Number(half.serializedBytes), terms, buildMs: Date.now() - t0,
   };
+}
+
+/** What a transfer built here moves: the type, the atoms and the recipient. */
+export interface TransferTermsOut {
+  tokenType: string;
+  amount: string;
+  to: string;
+}
+
+export interface BuiltTransferOut {
+  id: string;
+  transferTxB64: string;
+  bound: boolean;
+  serializedBytes: number;
+  inputs: number;
+  terms: TransferTermsOut;
+  buildMs: number;
+}
+
+/** A plain transfer from this wallet to another shielded address, for `sponsorTransfer`; bound unless `bind` is false. */
+export async function buildTransfer(config: NightgateMcpConfig, input: { tokenType: string; amount: string; to: string; bind?: boolean }): Promise<BuiltTransferOut> {
+  const t0 = Date.now();
+  setStage('syncing the wallet');
+  const wallet = await syncedWallet(config, SYNC_WAIT_MS);
+  if (typeof wallet.buildTransfer !== 'function') {
+    throw new Error('transfers need @odatano/nightgate-tx >= 0.17.0 next to the MCP server (npm install @odatano/nightgate-tx@latest)');
+  }
+  setStage('proving');
+  const built = await wallet.buildTransfer({ tokenType: input.tokenType, amount: input.amount, to: input.to, bind: input.bind !== false });
+  const terms: TransferTermsOut = { tokenType: String(built.terms.tokenType), amount: String(built.terms.amount), to: String(built.terms.to) };
+  const id = halfId(built.txB64);
+  pending.set(id, { revert: built.revert, terms, role: 'transfer' });
+  await writeState(config.swapStateFile, wallet).catch(() => { /* the transfer is built; the state follows at the next save */ });
+  return { id, transferTxB64: built.txB64, bound: built.bound === true, serializedBytes: Number(built.serializedBytes), inputs: Number(built.inputs), terms, buildMs: Date.now() - t0 };
 }
 
 export interface TakenOfferOut {

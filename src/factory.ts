@@ -1,5 +1,6 @@
 // Local minting on a token factory. The issuer secret is derived from the caller seed, the mint is built here,
 // and only the fee-unpaid transaction goes to a sponsor. Needs @odatano/contract-token-factory next to the package.
+import { randomBytes } from 'node:crypto';
 import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { builderChainOptions, type NightgateMcpConfig } from './config.js';
@@ -100,6 +101,57 @@ export async function buildMint(config: NightgateMcpConfig, input: MintInput): P
     domain,
     issuerKey: issuer,
     recipientCoinPublicKey: recipient,
+    serializedBytes: Number(built.serializedBytes ?? 0),
+    buildMs: Date.now() - t0,
+  };
+}
+
+export interface BurnInput {
+  contractAddress: string;
+  name: string;
+  amount: string;
+  /** The token's issuer key (64 hex). Default: this wallet's own issuer. */
+  issuerKey?: string;
+}
+
+export interface BurnBuild {
+  unboundTxB64: string;
+  tokenType: string;
+  domain: string;
+  issuerKey: string;
+  serializedBytes: number;
+  buildMs: number;
+}
+
+/**
+ * Build, prove and sign a burn locally; unbound, for sponsor_unbound_transaction.
+ * The burn takes a fresh coin of the token that this wallet funds; the contract sends it to the burn address.
+ */
+export async function buildBurn(config: NightgateMcpConfig, input: BurnInput): Promise<BurnBuild> {
+  const seedHex = await ensureSeed(config);
+  const t0 = Date.now();
+  const [issuerSecretOf, prepareBurn, tokenTypeOf] = await Promise.all([
+    txExport<(opts: { seedHex: string }) => Promise<string>>('tokenFactoryIssuerSecret', 'burning', '0.10.2'),
+    txExport<(input: Record<string, unknown>) => unknown>('prepareBurn', 'burning', '0.10.2'),
+    txExport<(pure: unknown, input: Record<string, unknown>) => Promise<{ issuer: string; domain: string; type: string }>>('tokenTypeOf', 'burning', '0.10.2'),
+  ]);
+  const { pureCircuits } = await loadFactoryModule();
+  const contractAddress = input.contractAddress.toLowerCase();
+  const naming = input.issuerKey ? { issuerKey: input.issuerKey.toLowerCase() } : { issuerSecret: await issuerSecretOf({ seedHex }) };
+  const { issuer, domain, type } = await tokenTypeOf(pureCircuits, { ...naming, name: input.name, contractAddress });
+  setStage('preparing the builder and prover keys');
+  const b = await getFactoryBuilder(config);
+  setStage('proving');
+  const built = await b.buildSponsorable({
+    contractAddress,
+    call: prepareBurn({ domain, coin: { nonce: randomBytes(32).toString('hex'), color: type, value: input.amount } }),
+    bind: false,
+  });
+  return {
+    unboundTxB64: String(built.unboundTxB64),
+    tokenType: type,
+    domain,
+    issuerKey: issuer,
     serializedBytes: Number(built.serializedBytes ?? 0),
     buildMs: Date.now() - t0,
   };

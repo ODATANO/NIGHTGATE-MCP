@@ -60,7 +60,8 @@ Errors carry the server's HTTP status and `code`.
 [docs/configuration.md](docs/configuration.md): every variable, an own
 NIGHTGATE instance, version requirements. Needs NIGHTGATE >= 0.36.0; from 0.37.0,
 which the hosted gateway runs, the server holds each status read until the job
-settles; from 0.38.0 `list_swap_offers` and `my_swap_offers` wait with `waitMs`.
+settles; from 0.38.0 `list_swap_offers` and `my_swap_offers` wait with `waitMs`;
+from 0.39.0 `send_token`, `burn_token`, directed offers and receipts.
 
 ## Development
 

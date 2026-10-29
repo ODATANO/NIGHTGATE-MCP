@@ -33,7 +33,9 @@ The first build downloads the prover keys and creates the seed file (see
 | `sponsor_swap` | Hand both halves of a swap, or a board offer plus the taker half, to a sponsor and wait |
 | `post_swap_offer`, `list_swap_offers`, `retire_swap_offer` | The server's offer board: post a maker half, find open offers, take yours down |
 | `get_swap_offer`, `my_swap_offers`, `get_board_status` | Follow one offer, see your own posts and their fills, read the board's counts without credentials |
-| `mint_token` | Mint a shielded token with a name of your own on a token factory; the seed is the issuer |
+| `mint_token`, `burn_token` | Mint a shielded token with a name of your own on a token factory, the seed is the issuer; burn one this wallet holds |
+| `send_token` | Pay another shielded address from this wallet; the sponsor pays the fee |
+| `call_contract` | Call a circuit on any contract whose lineage package is installed next to the server, built here and sponsored |
 | `derive_token_type` | Token type a minting contract produces |
 | `get_usage` | What the key has left and what each call cost. Free |
 | `analytics_*` | Midnight aggregates via ODATANO ASTRA, when the host serves it |
@@ -51,6 +53,7 @@ Errors carry the server's HTTP status and `code` (`INVALID_ARGUMENT`, ...).
 | `errorCode`, `errorMessage`, `next` | Why it failed and what to do |
 | `statusError` | With `pending`: why the status could not be read |
 | `check` | `{ tool, args }`: the call that shows the effect on-chain |
+| `receipt` | A landed swap or transfer: the instance's signed statement of the chain facts and the terms |
 | `seed` | Only once, when this call created the seed file |
 
 `failed` with `CHAIN_EXECUTION_FAILED`: the transaction is on-chain but its
@@ -160,6 +163,9 @@ Needs a Midnight indexer the swap wallet syncs its coins from
   fit. `give.amount` above `spendable` is refused before proving.
 - An offer fills once. Its coins stay reserved in the maker's wallet until the
   swap lands or `revert_swap_offer` releases them.
+- `post_swap_offer` with `directed: true` returns a `takerSecret` once: only a
+  taker who passes it to `take_swap_offer` or `sponsor_swap` gets the swap
+  sponsored, so an invoice or an agreed deal goes to its counterparty alone.
 - A refused submission keeps the proven half: `sponsor_swap` with its `halfId`.
 - The sponsor needs swaps switched on and both token types on its list; an
   agent grant needs `sponsorSwap` in `allowedActions`.
@@ -170,3 +176,31 @@ Needs a Midnight indexer the swap wallet syncs its coins from
   `@odatano/contract-token-factory` next to `@odatano/nightgate-tx`. A landed
   mint makes the type known to the sponsor.
 - `get_board_status` says whether a sponsor is ready before anything is built.
+
+## Transfers, burns and contract calls
+
+- `send_token({ tokenType, amount, to })` pays another shielded address from
+  this wallet: the transfer is built and proven here from the wallet's coins
+  (at most `maxInputs`), handed to the server's `sponsorTransfer` with the
+  declared type and amount, and the sponsor pays. The recipient needs nothing
+  but its address (`get_attester_identity` or `get_swap_wallet` of the other
+  side). Until the transfer lands its coins are pending; a refused submission
+  keeps the proven transfer under `halfId` for `revert_swap_offer`. The server
+  needs `NIGHTGATE_SPONSOR_ALLOW_TRANSFERS`, the grant `sponsorTransfer`, the
+  type the sponsor's list.
+- `burn_token({ contractAddress, name, amount, issuerKey? })` burns a factory
+  token this wallet holds; without `issuerKey` the token is one this wallet
+  minted. Same path as `mint_token`: built here, sponsored.
+- `call_contract({ package, contractAddress, circuit, args })` calls a circuit
+  on any contract whose lineage package is installed next to the server (laid
+  out like `@odatano/contract-<name>`). Arguments are JSON in circuit order;
+  `{"$bytes":"<hex>"}`, `{"$uint":"<n>"}` and `{"$coin":{"tokenType","amount"}}`
+  are tagged, a `$coin` is a shielded coin the circuit receives, funded from
+  this wallet (needs the indexer variables so the coins sync). Circuits that
+  need witnesses beyond the contract's own are not reachable here.
+- A landed swap or transfer carries `receipt` in its result:
+  `{ payload, signature, publicKey, algorithm }`, the instance's Ed25519
+  statement of the chain facts and the terms (`declared: true` for a
+  transfer). Check it against the key `getReceiptKey()` on the indexer service
+  publishes, without reading the board.
+
