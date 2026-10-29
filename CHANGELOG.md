@@ -7,6 +7,25 @@ The README says which NIGHTGATE the current version needs.
 
 ## [Unreleased]
 
+## [0.20.3] - 2026-10-29
+
+Needs NIGHTGATE 0.36.0; `send_token`, directed offers and receipts need 0.39.0.
+
+### Fixed
+
+- **`call_contract` funds a `$coin` from the wallet `get_swap_wallet` shows.**
+  The package builder ran a shielded wallet of its own, synced from genesis
+  and without the saved state, so the first call with a `$coin` answered
+  `Wallet.InsufficientFunds` while the swap wallet held the coin. The builder
+  now balances from the process's one shielded wallet
+  (`@odatano/nightgate-tx` 0.19.0, `createTxBuilder({ shieldedWallet })`):
+  one sync, one state file, one view of the coins a half or a call reserved.
+  A call with a `$coin` waits for that wallet's sync like the swap tools (20
+  s, then it says how far the sync is), is bound and goes through
+  `sponsorFinalizedTransaction`; the result carries `bound`. A shortfall
+  names the coin asked for and what the synced wallet holds free.
+- Depends on `@odatano/nightgate-tx` 0.19.0.
+
 ## [0.20.2] - 2026-10-29
 
 Needs NIGHTGATE 0.36.0; `send_token`, directed offers and receipts need 0.39.0.

@@ -162,7 +162,7 @@ async function openWallet(config: NightgateMcpConfig): Promise<OpenWallet> {
 }
 
 /** The wallet once it has caught up; a wallet that needs longer than `waitMs` says so instead of blocking the call. */
-async function syncedWallet(config: NightgateMcpConfig, waitMs: number): Promise<any> {
+export async function syncedWallet(config: NightgateMcpConfig, waitMs: number): Promise<any> {
   const entry = await openWallet(config);
   if (!entry.isSynced && !entry.syncError) {
     await Promise.race([entry.synced, new Promise((resolve) => setTimeout(resolve, waitMs))]);
@@ -181,7 +181,24 @@ async function syncedWallet(config: NightgateMcpConfig, waitMs: number): Promise
 }
 
 /** How long a tool call waits for a wallet that is still syncing. */
-const SYNC_WAIT_MS = 20_000;
+export const SYNC_WAIT_MS = 20_000;
+
+/**
+ * The one shielded wallet of this process, for a builder: `synced` waits for its coins like the swap
+ * tools do, otherwise it is only open. The builders share its sync and its view of the coins.
+ */
+export async function processWallet(config: NightgateMcpConfig, synced: boolean): Promise<any> {
+  const wallet = synced ? await syncedWallet(config, SYNC_WAIT_MS) : (await openWallet(config)).wallet;
+  if (!wallet.shieldedWallet) {
+    throw new Error('a contract call from this wallet needs @odatano/nightgate-tx >= 0.19.0 next to the MCP server (npm install @odatano/nightgate-tx@latest)');
+  }
+  return wallet;
+}
+
+/** Saves the wallet after a build reserved coins; a failed save is caught up by the next one. */
+export async function saveWalletState(config: NightgateMcpConfig, wallet: any): Promise<void> {
+  await writeState(config.swapStateFile, wallet).catch(() => { /* the next save carries it */ });
+}
 
 export async function swapWalletInfo(config: NightgateMcpConfig): Promise<Record<string, unknown>> {
   const entry = await openWallet(config);

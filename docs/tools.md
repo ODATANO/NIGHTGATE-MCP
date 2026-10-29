@@ -196,8 +196,13 @@ Needs a Midnight indexer the swap wallet syncs its coins from
   out like `@odatano/contract-<name>`). Arguments are JSON in circuit order;
   `{"$bytes":"<hex>"}`, `{"$uint":"<n>"}` and `{"$coin":{"tokenType","amount"}}`
   are tagged, a `$coin` is a shielded coin the circuit receives, funded from
-  this wallet (needs the indexer variables so the coins sync). Circuits that
-  need witnesses beyond the contract's own are not reachable here.
+  this wallet, the one `get_swap_wallet` shows (needs the indexer variables;
+  the tool waits up to 20 s for the wallet's sync and otherwise says how far
+  it is). A call with a `$coin` is bound and goes through
+  `sponsorFinalizedTransaction`, one without through the parallel channel; a
+  shortfall names the coin asked for and what the synced wallet holds free.
+  Circuits that need witnesses beyond the contract's own are not reachable
+  here.
 - A swap or transfer the block confirmed carries `receipt` in its result (the
   tool waits for the block, about a minute after the sponsor sent it; the same
   call again fetches a receipt that wait missed):

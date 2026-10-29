@@ -1081,7 +1081,9 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         'The call is built, proven and signed here from the caller seed and a sponsor pays, so the caller ' +
         'holds neither NIGHT nor DUST. Arguments are JSON in circuit order; tagged values: {"$bytes":"<hex>"}, ' +
         '{"$uint":"<n>"}, and {"$coin":{"tokenType","amount"}} for a shielded coin the circuit receives, ' +
-        'funded from this wallet (needs NIGHTGATE_INDEXER_HTTP_URL and _WS_URL so the coins sync). ' +
+        'funded from this wallet, the one get_swap_wallet shows (needs NIGHTGATE_INDEXER_HTTP_URL and _WS_URL; ' +
+        'the tool waits up to 20 s for its sync, a first sync from genesis takes about 5 minutes). A call ' +
+        'with a $coin is bound and goes through the serial sponsor channel, one without through the parallel one. ' +
         'Circuits that need witnesses beyond the contract\'s own are not reachable here. The contract has ' +
         'to be sponsorable (its address and circuit on the sponsor\'s policy). ' + WAIT_HINT,
       inputSchema: {
@@ -1097,10 +1099,13 @@ export function registerTools(server: McpServer, client: NightgateClient, config
       const input = { package: args.package, contractAddress: args.contractAddress.toLowerCase(), circuit: args.circuit, args: args.args ?? [] };
       const key = callKey('callContract', input);
       const started = await startOnce(key, async () => {
-        const { unboundTxB64, ...built } = await buildContractCall(config, input);
+        const { txB64, bound, ...built } = await buildContractCall(config, input);
         setStage('handing over to the sponsor');
-        const job = await client.callAction('sponsorUnboundTransaction', { unboundTxB64, idempotencyKey: args.idempotencyKey }) as Record<string, unknown>;
-        return { ...job, contractAddress: input.contractAddress, circuit: input.circuit, coins: built.coins, buildMs: built.buildMs, timings: { setupMs: built.setupMs, proveMs: built.proveMs } };
+        const job = await client.callAction(
+          bound ? 'sponsorFinalizedTransaction' : 'sponsorUnboundTransaction',
+          { ...(bound ? { finalizedTxB64: txB64 } : { unboundTxB64: txB64 }), idempotencyKey: args.idempotencyKey },
+        ) as Record<string, unknown>;
+        return { ...job, contractAddress: input.contractAddress, circuit: input.circuit, bound, coins: built.coins, buildMs: built.buildMs, timings: { setupMs: built.setupMs, proveMs: built.proveMs } };
       });
       const job = await awaitJob(client, config, started, extra);
       if (job.status === 'failed') forgetStart(key);

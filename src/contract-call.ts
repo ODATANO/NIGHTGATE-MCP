@@ -7,6 +7,7 @@ import { builderChainOptions, type NightgateMcpConfig } from './config.js';
 import { txExport } from './tx-module.js';
 import { ensureSeed } from './seed.js';
 import { setStage } from './jobs.js';
+import { processWallet, saveWalletState } from './swap.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const HEX64 = /^[0-9a-f]{64}$/;
@@ -22,7 +23,9 @@ export interface ContractCallInput {
 }
 
 export interface ContractCallBuild {
-  unboundTxB64: string;
+  txB64: string;
+  /** A call the wallet funds is bound (the wallet adds a balancing transaction) and goes to `sponsorFinalizedTransaction`. */
+  bound: boolean;
   serializedBytes: number;
   buildMs: number;
   setupMs: number;
@@ -31,32 +34,53 @@ export interface ContractCallBuild {
   coins: Array<{ tokenType: string; amount: string }>;
 }
 
-const builders = new Map<string, Promise<any>>();
+interface PackageBuilder {
+  builder: any;
+  /** The process wallet the builder balances from; a builder on a wallet that was replaced is closed. */
+  shieldedWallet: unknown;
+}
 
-/** One builder per package. With a configured indexer the shielded coins sync, so a `$coin` argument can be funded. */
-async function getPackageBuilder(config: NightgateMcpConfig, packageName: string): Promise<any> {
-  let entry = builders.get(packageName);
-  if (!entry) {
-    entry = (async () => {
-      const createTxBuilder = await txExport<(opts: Record<string, unknown>) => Promise<any>>('createTxBuilder', 'contract calls', '0.12.2');
-      const chain = builderChainOptions(config);
-      const opts: Record<string, unknown> = {
-        seedHex: config.seedHex,
-        networkId: config.network,
-        ...chain,
-        ...(config.indexerHttpUrl && config.indexerWsUrl ? { walletSync: 'shielded' } : {}),
-        package: packageName,
-        from: HERE,
-      };
-      if (config.proofServerUrl) {
-        opts.provingMode = 'server';
-        opts.proofServerUrl = config.proofServerUrl;
-      }
-      try { return await createTxBuilder(opts); } catch (err) { builders.delete(packageName); throw err; }
-    })();
-    builders.set(packageName, entry);
+const builders = new Map<string, Promise<PackageBuilder>>();
+
+/** One builder per package. It syncs no wallet of its own: a `$coin` is funded from the process wallet. */
+async function getPackageBuilder(config: NightgateMcpConfig, packageName: string, shieldedWallet: unknown): Promise<any> {
+  const cached = builders.get(packageName);
+  if (cached) {
+    const entry = await cached;
+    if (entry.shieldedWallet === shieldedWallet) return entry.builder;
+    builders.delete(packageName);
+    await entry.builder.close?.().catch(() => { /* its wallet is gone already */ });
   }
-  return entry;
+  const entry = (async (): Promise<PackageBuilder> => {
+    const createTxBuilder = await txExport<(opts: Record<string, unknown>) => Promise<any>>('createTxBuilder', 'contract calls', '0.12.2');
+    const opts: Record<string, unknown> = {
+      seedHex: config.seedHex,
+      networkId: config.network,
+      ...builderChainOptions(config),
+      ...(shieldedWallet ? { shieldedWallet } : {}),
+      package: packageName,
+      from: HERE,
+    };
+    if (config.proofServerUrl) {
+      opts.provingMode = 'server';
+      opts.proofServerUrl = config.proofServerUrl;
+    }
+    try { return { builder: await createTxBuilder(opts), shieldedWallet }; } catch (err) { builders.delete(packageName); throw err; }
+  })();
+  builders.set(packageName, entry);
+  return (await entry).builder;
+}
+
+/** What the synced wallet holds free of the colours a call asked for, for a shortfall message. */
+async function shortfallText(wallet: any, coins: Array<{ tokenType: string; amount: string }>): Promise<string> {
+  const held: Array<{ tokenType: string; amount: bigint }> = await wallet.coins();
+  const asked = coins.map((c) => `${c.amount} of ${c.tokenType}`).join(', ');
+  const free = coins.map((c) => {
+    const own = held.filter((h) => h.tokenType === c.tokenType);
+    const sum = own.reduce((s, h) => s + h.amount, 0n);
+    return `${sum} of ${c.tokenType} in ${own.length} free coin${own.length === 1 ? '' : 's'}`;
+  }).join(', ');
+  return `the wallet cannot fund the $coin argument (${asked}): synced, it holds ${free}; coins of a half or call that has not landed are reserved (get_swap_wallet lists them)`;
 }
 
 const hexBytes = (hex: unknown, what: string): Uint8Array => {
@@ -104,21 +128,36 @@ export async function buildContractCall(config: NightgateMcpConfig, input: Contr
   if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(input.circuit)) throw new Error('circuit must be a circuit name');
   const coins: Array<{ tokenType: string; amount: string }> = [];
   const args = coerceArgs(input.args ?? [], coins);
-  if (coins.length && !(config.indexerHttpUrl && config.indexerWsUrl)) {
-    throw new Error('a $coin argument needs the shielded coins of this wallet: set NIGHTGATE_INDEXER_HTTP_URL and NIGHTGATE_INDEXER_WS_URL so the builder syncs them');
+  const withIndexer = Boolean(config.indexerHttpUrl && config.indexerWsUrl);
+  if (coins.length && !withIndexer) {
+    throw new Error('a $coin argument needs the shielded coins of this wallet: set NIGHTGATE_INDEXER_HTTP_URL and NIGHTGATE_INDEXER_WS_URL so the wallet syncs them');
   }
   const t0 = Date.now();
+  let wallet: any = null;
+  if (withIndexer) {
+    setStage(coins.length ? 'syncing the wallet' : 'opening the wallet');
+    wallet = await processWallet(config, coins.length > 0);
+  }
   setStage('preparing the builder and prover keys');
-  const b = await getPackageBuilder(config, input.package);
+  const b = await getPackageBuilder(config, input.package, wallet?.shieldedWallet);
   const t1 = Date.now();
   setStage('proving');
-  const built = await b.buildSponsorable({
-    contractAddress: input.contractAddress.toLowerCase(),
-    call: { circuitId: input.circuit, args, witnesses: {} },
-    bind: false,
-  });
+  const bound = coins.length > 0;
+  let built: any;
+  try {
+    built = await b.buildSponsorable({
+      contractAddress: input.contractAddress.toLowerCase(),
+      call: { circuitId: input.circuit, args, witnesses: {} },
+      bind: bound,
+    });
+  } catch (err) {
+    if (bound && /InsufficientFunds/i.test(String((err as Error)?.message ?? err))) throw new Error(await shortfallText(wallet, coins));
+    throw err;
+  }
+  if (bound) await saveWalletState(config, wallet);
   return {
-    unboundTxB64: String(built.unboundTxB64),
+    txB64: String(bound ? built.finalizedTxB64 : built.unboundTxB64),
+    bound,
     serializedBytes: Number(built.serializedBytes ?? 0),
     buildMs: Date.now() - t0,
     setupMs: t1 - t0,
@@ -132,6 +171,6 @@ export async function closeContractBuilders(): Promise<void> {
   const open = [...builders.values()];
   builders.clear();
   for (const b of open) {
-    try { await (await b).close?.(); } catch { /* best effort */ }
+    try { await (await b).builder.close?.(); } catch { /* best effort */ }
   }
 }
