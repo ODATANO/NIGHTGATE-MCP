@@ -7,6 +7,23 @@ The README says which NIGHTGATE the current version needs.
 
 ## [Unreleased]
 
+## [0.20.2] - 2026-10-29
+
+Needs NIGHTGATE 0.36.0; `send_token`, directed offers and receipts need 0.39.0.
+
+### Fixed
+
+- **A landed swap or transfer answers with its receipt.** `send_token`,
+  `sponsor_swap` and `take_swap_offer` returned at job status `succeeded`,
+  before the block confirmed the transaction, so `receipt` was null in every
+  answer. The tool now keeps reading until `chainStatus` is `success`,
+  `failure` or `dropped`, within the same 5-minute wait; `next` says what to do
+  when the wait ran out or the chain refused the transaction. The progress
+  message names the stage (`landed, waiting for the block and the receipt`).
+- **Depends on `@odatano/nightgate-tx` 0.18.0.** `createTxBuilder` gained `walletSync: 'coins'`
+  (shielded and NIGHT coins, no dust wallet) and sync progress events; nothing in the
+  tools changes, `call_contract` keeps the shielded sync.
+
 ## [0.20.1] - 2026-10-29
 
 Needs NIGHTGATE 0.36.0; `send_token`, directed offers and receipts need 0.39.0.

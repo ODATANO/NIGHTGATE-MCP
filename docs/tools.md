@@ -53,7 +53,7 @@ Errors carry the server's HTTP status and `code` (`INVALID_ARGUMENT`, ...).
 | `errorCode`, `errorMessage`, `next` | Why it failed and what to do |
 | `statusError` | With `pending`: why the status could not be read |
 | `check` | `{ tool, args }`: the call that shows the effect on-chain |
-| `receipt` | A landed swap or transfer: the instance's signed statement of the chain facts and the terms |
+| `receipt` | A swap or transfer the block confirmed: the instance's signed statement of the chain facts and the terms. The tool waits for the block; null when that wait ran out first, the same call again fetches it |
 | `seed` | Only once, when this call created the seed file |
 
 `failed` with `CHAIN_EXECUTION_FAILED`: the transaction is on-chain but its
@@ -198,7 +198,9 @@ Needs a Midnight indexer the swap wallet syncs its coins from
   are tagged, a `$coin` is a shielded coin the circuit receives, funded from
   this wallet (needs the indexer variables so the coins sync). Circuits that
   need witnesses beyond the contract's own are not reachable here.
-- A landed swap or transfer carries `receipt` in its result:
+- A swap or transfer the block confirmed carries `receipt` in its result (the
+  tool waits for the block, about a minute after the sponsor sent it; the same
+  call again fetches a receipt that wait missed):
   `{ payload, signature, publicKey, algorithm }`, the instance's Ed25519
   statement of the chain facts and the terms (`declared: true` for a
   transfer). Check it against the key `getReceiptKey()` on the indexer service

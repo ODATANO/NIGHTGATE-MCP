@@ -54,6 +54,8 @@ const MAX_SLOT_WIDTH = 32;
 
 const RETRY_HINT = 'If the call was cut off or came back pending, run it again with the same arguments: ' +
   'it picks up the job it started and submits nothing new.';
+const RECEIPT_HINT = 'The tool also waits for the block (about a minute more) and then carries the instance\'s signed ' +
+  'receipt; if that wait runs out, receipt is null and the same call again fetches it. ';
 const WAIT_HINT = 'The tool waits until the job settled (about 1 minute) and returns { status, txHash, transactionHash, result }. ' +
   'failed: `next` says what to do. ' + RETRY_HINT;
 const MAX_MASK = 0xffffffff;
@@ -538,7 +540,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         'outside it. The transaction expires with its TTL (default 30 min), so hand it over ' +
         'promptly. This is the SERIAL channel (one tx per sponsor wallet at a time); for ' +
         'parallel submission build with bind:false and use sponsor_unbound_transaction. ' +
-        'The server picks the wallet that pays. ' + WAIT_HINT,
+        'The server picks the wallet that pays. ' + RECEIPT_HINT + WAIT_HINT,
       inputSchema: {
         txId: TX_ID.describe('txId returned by build_sponsorable_transaction (bind:true) on this server; the bytes never pass through the conversation'),
         file: TX_FILE,
@@ -759,7 +761,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         'An offer fills once: if it was taken first by somebody else the job fails. Pass both ' +
         'halves, or `halfId` alone for an offer this server took (take_swap_offer keeps both ' +
         'halves); with `offerId` the maker half comes from the board, next to takerHalf or the ' +
-        'halfId of the taken offer. ' + WAIT_HINT,
+        'halfId of the taken offer. ' + RECEIPT_HINT + WAIT_HINT,
       inputSchema: {
         makerHalf: swapHalf("The maker's half (the offer)").optional(),
         takerHalf: swapHalf("The taker's half").optional(),
@@ -1033,7 +1035,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         'proven here from the wallet\'s coins (at most maxInputs of them); only the fee-unpaid bytes go ' +
         'to the server, which records the declared type and amount and submits. The recipient needs ' +
         'nothing but its address. Needs sponsorTransfer in the grant, the type on the sponsor\'s list ' +
-        'and NIGHTGATE 0.39.0. A landed transfer carries a receipt signed by the instance. ' + WAIT_HINT,
+        'and NIGHTGATE 0.39.0. ' + RECEIPT_HINT + WAIT_HINT,
       inputSchema: {
         tokenType: hex64('tokenType').describe('Raw token type (64 hex), what derive_token_type or mint_token returns'),
         amount: z.union([

@@ -16,6 +16,16 @@ export interface JobCheck {
 const JOB_MAX_WAIT_MS = 300_000;
 /** How long one getJobStatus call lets the server wait, in ms. */
 const JOB_WAIT_MS = 20_000;
+/** Job kinds whose answer carries a receipt once the block confirmed the transaction. */
+const RECEIPT_KINDS = new Set(['sponsorSwap', 'sponsorTransfer']);
+const CHAIN_SETTLED = new Set(['success', 'failure', 'dropped']);
+
+const settled = (job: Record<string, unknown>): boolean => job.status === 'succeeded' || job.status === 'failed';
+
+/** A landed swap or transfer whose block has not confirmed it yet: the receipt is still to come. */
+export function receiptPending(job: Record<string, unknown>): boolean {
+  return job.status === 'succeeded' && RECEIPT_KINDS.has(String(job.kind)) && !CHAIN_SETTLED.has(String(job.chainStatus));
+}
 /** How long a started job is kept, so a repeated call picks it up instead of submitting again. */
 const STARTED_TTL_MS = 3_600_000;
 // Off for this process once the server refuses getJobStatus' waitMs.
@@ -33,6 +43,7 @@ export function setStage(stage: string): void {
 
 /** Stage of a job by its status, for the progress messages. */
 function jobStage(status: unknown): string {
+  if (status === 'succeeded') return 'landed, waiting for the block and the receipt';
   return status === 'external_execution' || status === 'submitted'
     ? 'submitted, waiting for the block'
     : 'waiting for the sponsor';
@@ -104,8 +115,9 @@ async function readJob(client: NightgateClient, config: NightgateMcpConfig | und
   }
 }
 
-// Waits until a sponsor job settled and returns its outcome. A job still open after 5 minutes,
-// or one whose status cannot be read, comes back as pending, with `check` to look it up on-chain.
+// Waits until a sponsor job settled and, for a swap or transfer, until the block confirmed it, so the
+// answer carries the receipt. A job still open after 5 minutes, or one whose status cannot be read,
+// comes back as pending, with `check` to look it up on-chain.
 export async function awaitJob(
   client: NightgateClient,
   config: NightgateMcpConfig | undefined,
@@ -119,7 +131,7 @@ export async function awaitJob(
   const deadline = Date.now() + JOB_MAX_WAIT_MS;
   let job: Record<string, unknown> = start;
   let statusError: string | undefined;
-  while (job.status !== 'succeeded' && job.status !== 'failed' && Date.now() < deadline) {
+  while ((!settled(job) || receiptPending(job)) && Date.now() < deadline) {
     if (extra?.signal.aborted) break;
     setStage(jobStage(job.status));
     const t0 = Date.now();
@@ -145,13 +157,16 @@ function outcome(job: Record<string, unknown>, check?: JobCheck, statusError?: s
   } else if (result !== undefined && result !== null) {
     out.result = result;
   }
-  const settled = job.status === 'succeeded' || job.status === 'failed';
-  if (!settled) {
+  if (!settled(job)) {
     out.status = 'pending';
     out.next = 'The job runs on. Run this tool again with the same arguments to wait for it; it submits nothing new.';
     if (statusError) out.statusError = statusError;
+  } else if (receiptPending(job)) {
+    out.next = 'The transaction is sent; its receipt comes once the block confirmed it. Run this tool again with the same arguments to fetch it; it submits nothing new.';
+  } else if (job.status === 'succeeded' && RECEIPT_KINDS.has(String(job.kind)) && job.chainStatus !== 'success') {
+    out.next = `The sponsor sent the transaction but the chain reports it as ${String(job.chainStatus)}; no receipt exists. Check get_swap_wallet before running the tool again.`;
   }
-  const timings = { ...(isRecord(job.timings) ? job.timings : {}), ...(settled ? serverTimings(job) : {}) };
+  const timings = { ...(isRecord(job.timings) ? job.timings : {}), ...(settled(job) ? serverTimings(job) : {}) };
   if (Object.keys(timings).length) out.timings = timings;
   const step = nextStep(job);
   if (step) out.next = step;
