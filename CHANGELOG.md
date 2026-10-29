@@ -7,6 +7,17 @@ The README says which NIGHTGATE the current version needs.
 
 ## [Unreleased]
 
+## [0.20.1] - 2026-10-29
+
+Needs NIGHTGATE 0.36.0; `send_token`, directed offers and receipts need 0.39.0.
+
+### Fixed
+
+- **`send_token` accepts every shielded address.** `@odatano/nightgate-tx`
+  0.17.1 decodes a 132-character shielded address with any `@scure/base` 2.x;
+  0.17.0 refused the address `get_swap_wallet` shows under `@scure/base`
+  2.4.0 with `invalid string length 132, expected (8..90)`.
+
 ## [0.20.0] - 2026-10-28
 
 Needs NIGHTGATE 0.36.0; `send_token`, directed offers and receipts need 0.39.0.
