@@ -5,14 +5,14 @@ import { int64, raw, NightgateApiError, NightgateClient } from './client.js';
 import { isGatewayKey, vaultOf, type NightgateMcpConfig } from './config.js';
 import { BUILDABLE_CALLS, BUILDABLE_ARTIFACTS, DEFAULT_ARTIFACT, buildSponsorable, attesterIdentity, type BuildInput } from './builder.js';
 import {
-  buildOffer, buildTransfer, earliestPostedAt, halfJobIds, postedOfferIds, readOffer, revertHalf, sameOffer, settleBoardRows, settleHalfJob, swapWalletInfo, takenHalves,
-  takeOffer, trackHalfJob, trackPostedHalf,
+  buildOffer, buildTransfer, earliestPostedAt, halfJobIds, postedOfferIds, readOffer, releaseLapsedHalves, revertHalf, revertOffer, sameOffer, settleBoardRows,
+  settleHalfJob, swapWalletInfo, takenHalves, takeOffer, trackHalfJob, trackPostedHalf,
 } from './swap.js';
 import { buildBurn, buildMint } from './factory.js';
-import { buildContractCall } from './contract-call.js';
+import { buildContractCall, nightCallSent } from './contract-call.js';
 import { randomBytes } from 'node:crypto';
 import { resolveTxSource } from './built.js';
-import { awaitJob, callStage, forgetStart, jobSession, setStage, startOnce, type JobCheck, type ToolExtra } from './jobs.js';
+import { awaitJob, callStage, chainOutcome, forgetStart, jobSession, markReused, startSponsored, type JobCheck, type ToolExtra } from './jobs.js';
 import { seedCreated, seedNotice } from './seed.js';
 
 const HEX64 = /^[0-9a-fA-F]{64}$/;
@@ -53,7 +53,8 @@ const BOARD_ROW_HINT = 'Each row: offerId, the offer half (feed it to read_swap_
 const MAX_SLOT_WIDTH = 32;
 
 const RETRY_HINT = 'If the call was cut off or came back pending, run it again with the same arguments: ' +
-  'it picks up the job it started and submits nothing new.';
+  'it picks up the job it started and submits nothing new (the answer says deduplicated). ' +
+  'A second, separate call with the same arguments needs a new idempotencyKey.';
 const RECEIPT_HINT = 'The tool also waits for the block (about a minute more) and then carries the instance\'s signed ' +
   'receipt; if that wait runs out, receipt is null and the same call again fetches it. ';
 const WAIT_HINT = 'The tool waits until the job settled (about 1 minute) and returns { status, txHash, transactionHash, result }. ' +
@@ -117,6 +118,33 @@ const CONTRACT = z.string().regex(HEX64, 'contractAddress must be 64 hex charact
 /** Every NIGHTGATE tool. Writes are built here with the caller seed and paid by a sponsor; no tool needs a server wallet. */
 export function registerTools(server: McpServer, client: NightgateClient, config?: NightgateMcpConfig): void {
   const run = wrapHandler(client);
+  /** What a contract call that pays NIGHT does once its job settled, by job id; it runs once. */
+  const callSettlers = new Map<string, (outcome: 'landed' | 'failed') => Promise<void>>();
+  // A job that was still open when its tool returned may have landed or failed since.
+  const settleOpenJobs = async (): Promise<void> => {
+    if (!config) return;
+    for (const jobId of new Set([...halfJobIds(), ...callSettlers.keys()])) {
+      const sessionId = jobSession(jobId);
+      if (!sessionId) continue;
+      const job = await client.callAction('getJobStatus', { jobId, sessionId }).catch(() => undefined) as Record<string, unknown> | undefined;
+      if (!job) continue;
+      await settleHalfJob(config, jobId, job);
+      await settleCall(jobId, job);
+    }
+  };
+  const settleCall = async (jobId: string, job: Record<string, unknown>): Promise<void> => {
+    const outcome = chainOutcome(job);
+    const settle = callSettlers.get(jobId);
+    if (outcome === 'unknown' || !settle) return;
+    callSettlers.delete(jobId);
+    await settle(outcome).catch((err) => console.error(`nightgate-mcp: NIGHT coins of job ${jobId} not settled: ${(err as Error).message}`));
+  };
+  /** Board rows pass through after settling the halves posted as them; a lapsed half is released in the background. */
+  const settleRows = <T>(rows: T): T => {
+    settleBoardRows(rows);
+    if (config) void releaseLapsedHalves(config).catch(() => { /* logged where it failed */ });
+    return rows;
+  };
   const vault = (contractAddress?: string, compiledArtifactRef?: string): string => {
     if (config) return vaultOf(config, contractAddress, compiledArtifactRef);
     if (!contractAddress) throw new Error('contractAddress is required');
@@ -334,40 +362,39 @@ export function registerTools(server: McpServer, client: NightgateClient, config
     }),
   );
 
-  /** Wait for a swap job; a landed swap frees its half here. */
+  /** Wait for a swap job; a landed swap frees its half here, one the chain refused stays for a revert. */
   const awaitSwap = async (started: Record<string, unknown>, offerId: string | undefined, extra: ToolExtra) => {
     const check: JobCheck = offerId ? { tool: 'get_swap_offer', args: { offerId } } : { tool: 'get_swap_wallet', args: {} };
     const job = await awaitJob(client, config, started, extra, check);
-    if (typeof started.jobId === 'string') settleHalfJob(started.jobId, job.status);
+    if (config && typeof started.jobId === 'string') await settleHalfJob(config, started.jobId, job);
     return job;
   };
 
   /** Hand bytes to a sponsor once and wait; the same bytes again pick up that job. */
-  const sponsorOnce = async (action: string, body: Record<string, unknown>, extra: ToolExtra, check?: JobCheck) => {
-    const key = callKey(action, body);
-    const started = await startOnce(key, async () => await client.callAction(action, body) as Record<string, unknown>);
-    const job = await awaitJob(client, config, started, extra, check);
-    if (job.status === 'failed') forgetStart(key);
-    return job;
+  const sponsorOnce = async (action: string, body: Record<string, unknown>, idempotencyKey: string | undefined, extra: ToolExtra, check?: JobCheck) => {
+    const key = callKey(action, body, idempotencyKey ?? null);
+    const started = await startSponsored(client, key, idempotencyKey, async (k) => ({ action, body: { ...body, idempotencyKey: k } }));
+    const job = await awaitJob(client, config, started.job, extra, check);
+    if (chainOutcome(job) === 'failed') forgetStart(key);
+    return markReused(job, started, !!idempotencyKey);
   };
 
   /** Build one vault call here, hand it to the sponsor and wait until it settled. */
   const submitVaultCall = async (input: Omit<BuildInput, 'bind'>, idempotencyKey: string | undefined, extra: ToolExtra): Promise<Record<string, unknown>> => {
     if (!config) throw new Error('local building is not configured for this server instance');
-    const key = callKey('vault', input.contractAddress, input.compiledArtifactRef ?? DEFAULT_ARTIFACT, input.call, input.params, input.merkleProof, input.docPair);
-    const started = await startOnce(key, async () => {
+    const key = callKey('vault', input.contractAddress, input.compiledArtifactRef ?? DEFAULT_ARTIFACT, input.call, input.params, input.merkleProof, input.docPair, idempotencyKey ?? null);
+    const started = await startSponsored(client, key, idempotencyKey, async (k) => {
       const built = await buildSponsorable(config, { ...input, bind: false });
       const { b64 } = await resolveTxSource({ txId: built.txId }, 'unboundTxB64');
-      setStage('handing over to the sponsor');
-      const job = await client.callAction('sponsorUnboundTransaction', { unboundTxB64: b64, idempotencyKey }) as Record<string, unknown>;
       return {
-        ...job, attesterId: built.attesterId, contractAddress: input.contractAddress, buildMs: built.buildMs,
-        timings: { setupMs: built.setupMs, proveMs: built.proveMs },
+        action: 'sponsorUnboundTransaction',
+        body: { unboundTxB64: b64, idempotencyKey: k },
+        info: { attesterId: built.attesterId, contractAddress: input.contractAddress, buildMs: built.buildMs, timings: { setupMs: built.setupMs, proveMs: built.proveMs } },
       };
     });
-    const job = await awaitJob(client, config, started, extra, checkFor(input, String(started.attesterId)));
-    if (job.status === 'failed') forgetStart(key);
-    return job;
+    const job = await awaitJob(client, config, started.job, extra, checkFor(input, String(started.job.attesterId)));
+    if (chainOutcome(job) === 'failed') forgetStart(key);
+    return markReused(job, started, !!idempotencyKey);
   };
 
   server.registerTool(
@@ -552,7 +579,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
     },
     run(async (args, extra) => {
       const { b64, sent } = await resolveTxSource({ txId: args.txId, file: args.file, b64: args.finalizedTxB64 }, 'finalizedTxB64');
-      return { ...await sponsorOnce('sponsorFinalizedTransaction', { finalizedTxB64: b64, idempotencyKey: args.idempotencyKey }, extra), sent };
+      return { ...await sponsorOnce('sponsorFinalizedTransaction', { finalizedTxB64: b64 }, args.idempotencyKey, extra), sent };
     }),
   );
 
@@ -583,7 +610,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
     },
     run(async (args, extra) => {
       const { b64, sent } = await resolveTxSource({ txId: args.txId, file: args.file, b64: args.unboundTxB64 }, 'unboundTxB64');
-      return { ...await sponsorOnce('sponsorUnboundTransaction', { unboundTxB64: b64, idempotencyKey: args.idempotencyKey }, extra), sent };
+      return { ...await sponsorOnce('sponsorUnboundTransaction', { unboundTxB64: b64 }, args.idempotencyKey, extra), sent };
     }),
   );
 
@@ -597,23 +624,20 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         '`pending`, what the halves built here bring back once their swaps land (the change and the ' +
         'wanted coins). While a half can still land the wallet is worth balance plus pending; a half ' +
         'can give only from balance, and revert_swap_offer moves a dropped half back into it. ' +
-        'Also lists the halves built here that are not handed over yet; one posted with ' +
-        'post_swap_offer carries offerId and boardStatus and leaves the list once its offer filled. The wallet syncs its ' +
-        'shielded coins only; a first sync from genesis takes about 5 minutes, during which the ' +
+        'Also lists the halves built here that are not handed over yet (pendingHalves, with those of an earlier ' +
+        'process marked restored) and the coins the SDK holds reserved (reserved, each with its ttl); one posted with ' +
+        'post_swap_offer carries offerId and boardStatus and leaves the list once its offer filled. A maker half whose ' +
+        'offer expired or was retired 15 minutes ago and that went into no job is released here on its own (released). ' +
+        'The wallet syncs its shielded coins only; a first sync from genesis takes about 5 minutes, during which the ' +
         'answer is { synced: false, syncingSeconds }: call again. Spends nothing.',
       inputSchema: {},
     },
     run(async () => {
       if (!config) throw new Error('swaps are not configured for this server instance');
       if (postedOfferIds().length) await settlePostedOffers();
-      // a swap job that was still open when its tool returned may have landed since
-      for (const jobId of halfJobIds()) {
-        const sessionId = jobSession(jobId);
-        if (!sessionId) continue;
-        const job = await client.callAction('getJobStatus', { jobId, sessionId }).catch(() => undefined) as Record<string, unknown> | undefined;
-        if (job) settleHalfJob(jobId, job.status);
-      }
-      return swapWalletInfo(config);
+      await settleOpenJobs();
+      const released = await releaseLapsedHalves(config);
+      return { ...await swapWalletInfo(config), ...(released.length ? { released } : {}) };
     }),
   );
 
@@ -704,27 +728,25 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         });
       };
       if (args.submit !== true) return take();
-      const key = callKey('takeSwapOffer', args.offer, args.expect, args.offerId);
-      const started = await startOnce(key, async () => {
+      const key = callKey('takeSwapOffer', args.offer, args.expect, args.offerId, args.idempotencyKey ?? null);
+      const started = await startSponsored(client, key, args.idempotencyKey, async (k) => {
         const taken = await take();
-        let job: Record<string, unknown>;
-        try {
-          job = await client.callAction('sponsorSwap', {
+        return {
+          action: 'sponsorSwap',
+          body: {
             ...(args.offerId ? { offerId: args.offerId } : { makerHalfB64: taken.makerHalfB64 }),
             takerHalfB64: taken.takerHalfB64,
-            idempotencyKey: args.idempotencyKey,
+            idempotencyKey: k,
             ...(args.takerSecret ? { takerSecret: args.takerSecret } : {}),
-          }) as Record<string, unknown>;
-        } catch (err) {
-          if (!(err instanceof NightgateApiError)) throw err;
-          throw new NightgateApiError(err.status, err.code, err.message, { ...(err.detail ?? {}), halfId: taken.id });
-        }
-        trackHalfJob(taken.id, job.jobId);
-        return { ...job, id: taken.id, terms: taken.terms, bound: taken.bound, buildMs: taken.buildMs };
+          },
+          info: { id: taken.id, terms: taken.terms, bound: taken.bound, buildMs: taken.buildMs },
+          detail: { halfId: taken.id },
+        };
       });
-      const settled = await awaitSwap(started, args.offerId, extra);
-      if (settled.status === 'failed') forgetStart(key);
-      return settled;
+      trackHalfJob(String(started.job.id), started.job.jobId);
+      const settled = await awaitSwap(started.job, args.offerId, extra);
+      if (chainOutcome(settled) === 'failed') forgetStart(key);
+      return markReused(settled, started, !!args.idempotencyKey);
     }),
   );
 
@@ -732,18 +754,24 @@ export function registerTools(server: McpServer, client: NightgateClient, config
     'revert_swap_offer',
     {
       description:
-        'Release the coins of a swap half this server built (build_swap_offer or take_swap_offer) ' +
-        'that is not going to be used. Until then, or until the swap lands, the coins count as ' +
-        'spent in this wallet. It does not recall an offer somebody already holds: to make a ' +
-        'published offer worthless, spend its coins in another swap. Ids are listed by ' +
-        'get_swap_wallet; a half whose swap landed leaves the list.',
+        'Release the coins of a swap half this wallet built (build_swap_offer, take_swap_offer or ' +
+        'send_token) that is not going to be used. Until then, or until the swap lands, the coins count as ' +
+        'spent in this wallet. By id for a half listed by get_swap_wallet, also one restored from an earlier ' +
+        'process; by offerId for a board offer this wallet posted, from the board\'s copy of the half, which ' +
+        'works after a restart and needs the offer closed (expired or retired; retire_swap_offer first while it ' +
+        'is open). It does not recall an offer somebody already holds: to make a published offer worthless, ' +
+        'spend its coins in another swap. A half whose swap landed leaves the list; its coins are spent.',
       inputSchema: {
-        id: z.string().regex(/^[0-9a-f]{32}$/, 'id must be the 32 hex characters a swap tool returned'),
+        id: z.string().regex(/^[0-9a-f]{32}$/, 'id must be the 32 hex characters a swap tool returned').optional(),
+        offerId: z.string().uuid().optional().describe('The board entry, instead of id'),
       },
     },
     run(async (args) => {
       if (!config) throw new Error('swaps are not configured for this server instance');
-      return revertHalf(config, args.id);
+      if (args.id) return revertHalf(config, args.id);
+      if (!args.offerId) throw new Error('pass id (a half listed by get_swap_wallet) or offerId (a board offer this wallet posted)');
+      const row = await client.callFunction('getSwapOffer', { offerId: raw(args.offerId) }) as { status?: unknown; offer?: unknown };
+      return revertOffer(config, args.offerId, row);
     }),
   );
 
@@ -789,17 +817,15 @@ export function registerTools(server: McpServer, client: NightgateClient, config
           ? { makerHalfB64: args.makerHalf, takerHalfB64: args.takerHalf }
           : takenHalves(args.halfId as string);
       }
-      const key = callKey('sponsorSwap', halves);
-      const started = await startOnce(key, async () => {
-        const job = await client.callAction('sponsorSwap', {
-          ...halves, idempotencyKey: args.idempotencyKey, ...(args.takerSecret ? { takerSecret: args.takerSecret } : {}),
-        }) as Record<string, unknown>;
-        if (args.halfId) trackHalfJob(args.halfId, job?.jobId);
-        return job;
-      });
-      const settled = await awaitSwap(started, args.offerId, extra);
-      if (settled.status === 'failed') forgetStart(key);
-      return settled;
+      const key = callKey('sponsorSwap', halves, args.idempotencyKey ?? null);
+      const started = await startSponsored(client, key, args.idempotencyKey, async (k) => ({
+        action: 'sponsorSwap',
+        body: { ...halves, idempotencyKey: k, ...(args.takerSecret ? { takerSecret: args.takerSecret } : {}) },
+      }));
+      if (args.halfId) trackHalfJob(args.halfId, started.job.jobId);
+      const settled = await awaitSwap(started.job, args.offerId, extra);
+      if (chainOutcome(settled) === 'failed') forgetStart(key);
+      return markReused(settled, started, !!args.idempotencyKey);
     }),
   );
 
@@ -858,7 +884,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
           .describe('Hold the call while nothing matches, up to this many ms (at most 25000); needs NIGHTGATE 0.38.0'),
       },
     },
-    run(async (args) => settled(await listOffers(client, { ...args, mine: null }))),
+    run(async (args) => settleRows(await listOffers(client, { ...args, mine: null }))),
   );
 
   server.registerTool(
@@ -878,7 +904,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
           .describe('Hold the call while nothing matches, up to this many ms (at most 25000); needs NIGHTGATE 0.38.0'),
       },
     },
-    run(async (args) => settled(await listOffers(client, { status: args.status ?? 'all', since: args.since, limit: args.limit, mine: true, waitMs: args.waitMs }))),
+    run(async (args) => settleRows(await listOffers(client, { status: args.status ?? 'all', since: args.since, limit: args.limit, mine: true, waitMs: args.waitMs }))),
   );
 
   server.registerTool(
@@ -892,7 +918,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         offerId: z.string().uuid().describe('The board entry'),
       },
     },
-    run(async (args) => settled(await client.callFunction('getSwapOffer', { offerId: raw(args.offerId) }))),
+    run(async (args) => settleRows(await client.callFunction('getSwapOffer', { offerId: raw(args.offerId) }))),
   );
 
   server.registerTool(
@@ -913,7 +939,9 @@ export function registerTools(server: McpServer, client: NightgateClient, config
     {
       description:
         'Take an offer off the board. Only its poster may; the coins behind the half stay ' +
-        'reserved until revert_swap_offer releases the half built here. Returns { offerId, status }.',
+        'reserved until revert_swap_offer releases the half built here (or until the 15-minute release of ' +
+        'get_swap_wallet). Returns { offerId, status }: retired, or the status of an offer already closed ' +
+        '(expired, retired, filled), so a lapsed offer answers expired instead of an error (NIGHTGATE 0.40.0).',
       inputSchema: {
         offerId: z.string().uuid().describe('The board entry'),
       },
@@ -979,15 +1007,14 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         recipientCoinPublicKey: args.recipientCoinPublicKey,
         recipientEncryptionPublicKey: args.recipientEncryptionPublicKey,
       };
-      const key = callKey('mintToken', input);
-      const started = await startOnce(key, async () => {
+      const key = callKey('mintToken', input, args.idempotencyKey ?? null);
+      const started = await startSponsored(client, key, args.idempotencyKey, async (k) => {
         const { unboundTxB64, ...built } = await buildMint(config, input);
-        const job = await client.callAction('sponsorUnboundTransaction', { unboundTxB64, idempotencyKey: args.idempotencyKey }) as Record<string, unknown>;
-        return { ...built, ...job };
+        return { action: 'sponsorUnboundTransaction', body: { unboundTxB64, idempotencyKey: k }, info: built };
       });
-      const job = await awaitJob(client, config, started, extra, { tool: 'get_swap_wallet', args: {} });
-      if (job.status === 'failed') forgetStart(key);
-      return job;
+      const job = await awaitJob(client, config, started.job, extra, { tool: 'get_swap_wallet', args: {} });
+      if (chainOutcome(job) === 'failed') forgetStart(key);
+      return markReused(job, started, !!args.idempotencyKey);
     }),
   );
 
@@ -1014,15 +1041,14 @@ export function registerTools(server: McpServer, client: NightgateClient, config
     run(async (args, extra) => {
       if (!config) throw new Error('local burning is not configured for this server instance');
       const input = { contractAddress: args.contractAddress, name: args.name, amount: String(args.amount), issuerKey: args.issuerKey };
-      const key = callKey('burnToken', input);
-      const started = await startOnce(key, async () => {
+      const key = callKey('burnToken', input, args.idempotencyKey ?? null);
+      const started = await startSponsored(client, key, args.idempotencyKey, async (k) => {
         const { unboundTxB64, ...built } = await buildBurn(config, input);
-        const job = await client.callAction('sponsorUnboundTransaction', { unboundTxB64, idempotencyKey: args.idempotencyKey }) as Record<string, unknown>;
-        return { ...built, ...job };
+        return { action: 'sponsorUnboundTransaction', body: { unboundTxB64, idempotencyKey: k }, info: built };
       });
-      const job = await awaitJob(client, config, started, extra, { tool: 'get_swap_wallet', args: {} });
-      if (job.status === 'failed') forgetStart(key);
-      return job;
+      const job = await awaitJob(client, config, started.job, extra, { tool: 'get_swap_wallet', args: {} });
+      if (chainOutcome(job) === 'failed') forgetStart(key);
+      return markReused(job, started, !!args.idempotencyKey);
     }),
   );
 
@@ -1049,26 +1075,21 @@ export function registerTools(server: McpServer, client: NightgateClient, config
     run(async (args, extra) => {
       if (!config) throw new Error('transfers are not configured for this server instance');
       const input = { tokenType: args.tokenType.toLowerCase(), amount: String(args.amount), to: args.to.trim() };
-      const key = callKey('sendToken', input);
-      const started = await startOnce(key, async () => {
+      const key = callKey('sendToken', input, args.idempotencyKey ?? null);
+      const started = await startSponsored(client, key, args.idempotencyKey, async (k) => {
         const built = await buildTransfer(config, input);
-        let job: Record<string, unknown>;
-        try {
-          setStage('handing over to the sponsor');
-          job = await client.callAction('sponsorTransfer', {
-            transferTxB64: built.transferTxB64, tokenType: input.tokenType, amount: input.amount, idempotencyKey: args.idempotencyKey,
-          }) as Record<string, unknown>;
-        } catch (err) {
-          if (!(err instanceof NightgateApiError)) throw err;
-          throw new NightgateApiError(err.status, err.code, err.message, { ...(err.detail ?? {}), halfId: built.id });
-        }
-        trackHalfJob(built.id, job.jobId);
-        return { ...job, id: built.id, terms: built.terms, inputs: built.inputs, buildMs: built.buildMs };
+        return {
+          action: 'sponsorTransfer',
+          body: { transferTxB64: built.transferTxB64, tokenType: input.tokenType, amount: input.amount, idempotencyKey: k },
+          info: { id: built.id, terms: built.terms, inputs: built.inputs, buildMs: built.buildMs },
+          detail: { halfId: built.id },
+        };
       });
-      const job = await awaitJob(client, config, started, extra, { tool: 'get_swap_wallet', args: {} });
-      if (typeof started.jobId === 'string') settleHalfJob(started.jobId, job.status);
-      if (job.status === 'failed') forgetStart(key);
-      return job;
+      trackHalfJob(String(started.job.id), started.job.jobId);
+      const job = await awaitJob(client, config, started.job, extra, { tool: 'get_swap_wallet', args: {} });
+      if (typeof started.job.jobId === 'string') await settleHalfJob(config, started.job.jobId, job);
+      if (chainOutcome(job) === 'failed') forgetStart(key);
+      return markReused(job, started, !!args.idempotencyKey);
     }),
   );
 
@@ -1081,35 +1102,66 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         'The call is built, proven and signed here from the caller seed and a sponsor pays, so the caller ' +
         'holds neither NIGHT nor DUST. Arguments are JSON in circuit order; tagged values: {"$bytes":"<hex>"}, ' +
         '{"$uint":"<n>"}, and {"$coin":{"tokenType","amount"}} for a shielded coin the circuit receives, ' +
-        'funded from this wallet, the one get_swap_wallet shows (needs NIGHTGATE_INDEXER_HTTP_URL and _WS_URL; ' +
-        'the tool waits up to 20 s for its sync, a first sync from genesis takes about 5 minutes). A call ' +
-        'with a $coin is bound and goes through the serial sponsor channel, one without through the parallel one. ' +
-        'Circuits that need witnesses beyond the contract\'s own are not reachable here. The contract has ' +
-        'to be sponsorable (its address and circuit on the sponsor\'s policy). ' + WAIT_HINT,
+        'funded from this wallet, the one get_swap_wallet shows (a gateway key syncs it through the gateway, ' +
+        'a direct instance needs NIGHTGATE_INDEXER_HTTP_URL and _WS_URL; the tool waits up to 20 s for its sync, ' +
+        'a first sync from genesis takes about 5 minutes). {"$night":"<atoms>"} is a NIGHT amount the circuit ' +
+        'takes from this wallet (receiveUnshielded, a deposit or a stake): the wallet syncs its NIGHT coins ' +
+        'and pays them in, the sponsor adds only the fee; set payUnshielded when the amount is no argument. ' +
+        'Needs allowUnshieldedOffers on the grant; one pay-in runs at a time. A payout the circuit makes to this wallet (sendUnshielded, ' +
+        'a claim or a refund) needs nothing extra: NIGHTGATE 0.40.0 sponsors it. A call that funds anything is ' +
+        'bound and goes through the serial sponsor channel, one without through the parallel one. ' +
+        'Witnesses come from the package when its contract.json names a witnesses module (createWitnesses ' +
+        'gets a secret derived from the seed for that package; the private state they return is kept once the call landed). The contract has to be sponsorable (its ' +
+        'address and circuit on the sponsor\'s policy). The answer waits for the block; a call the chain refused ' +
+        'gives its coins back. ' + WAIT_HINT,
       inputSchema: {
         package: z.string().min(1).max(214).describe('The installed lineage package, for example @meridian/contract-m402'),
         contractAddress: hex64('contractAddress').describe('The deployment to call'),
         circuit: z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/, 'circuit must be a circuit name').describe('The circuit to call'),
         args: z.array(z.unknown()).max(32).optional().describe('Circuit arguments in order, with the tagged values described above'),
-        idempotencyKey: z.string().optional().describe('Dedupes retries'),
+        payUnshielded: z.boolean().optional().describe('The circuit takes unshielded tokens from this wallet; implied by a $night argument'),
+        idempotencyKey: z.string().optional().describe('Dedupes retries; an identical call without a new key returns the first job'),
       },
     },
     run(async (args, extra) => {
       if (!config) throw new Error('local building is not configured for this server instance');
-      const input = { package: args.package, contractAddress: args.contractAddress.toLowerCase(), circuit: args.circuit, args: args.args ?? [] };
-      const key = callKey('callContract', input);
-      const started = await startOnce(key, async () => {
-        const { txB64, bound, ...built } = await buildContractCall(config, input);
-        setStage('handing over to the sponsor');
-        const job = await client.callAction(
-          bound ? 'sponsorFinalizedTransaction' : 'sponsorUnboundTransaction',
-          { ...(bound ? { finalizedTxB64: txB64 } : { unboundTxB64: txB64 }), idempotencyKey: args.idempotencyKey },
-        ) as Record<string, unknown>;
-        return { ...job, contractAddress: input.contractAddress, circuit: input.circuit, bound, coins: built.coins, buildMs: built.buildMs, timings: { setupMs: built.setupMs, proveMs: built.proveMs } };
+      const input = {
+        package: args.package, contractAddress: args.contractAddress.toLowerCase(), circuit: args.circuit, args: args.args ?? [],
+        ...(args.payUnshielded ? { payUnshielded: true } : {}),
+      };
+      const key = callKey('callContract', input, args.idempotencyKey ?? null);
+      if (callSettlers.size) await settleOpenJobs();
+      const started = await startSponsored(client, key, args.idempotencyKey, async (k) => {
+        const { txB64, bound, settle, ...built } = await buildContractCall(config, input, key);
+        const release = async () => {
+          await settle('failed');
+          if (built.pendingId) await revertHalf(config, built.pendingId);
+        };
+        return {
+          action: bound ? 'sponsorFinalizedTransaction' : 'sponsorUnboundTransaction',
+          body: { ...(bound ? { finalizedTxB64: txB64 } : { unboundTxB64: txB64 }), idempotencyKey: k },
+          info: {
+            contractAddress: input.contractAddress, circuit: input.circuit, bound, coins: built.coins,
+            ...(built.night.length ? { night: built.night } : {}), ...(built.unshielded ? { payUnshielded: true } : {}),
+            ...(built.witnesses ? { witnesses: 'package' } : {}), ...(built.pendingId ? { pendingId: built.pendingId } : {}),
+            buildMs: built.buildMs, timings: { setupMs: built.setupMs, proveMs: built.proveMs },
+          },
+          onRefused: release,
+          onSent: (job) => {
+            nightCallSent(txB64, job.jobId);
+            if (typeof job.jobId === 'string') callSettlers.set(job.jobId, settle);
+          },
+        };
       });
-      const job = await awaitJob(client, config, started, extra);
-      if (job.status === 'failed') forgetStart(key);
-      return job;
+      const jobId = typeof started.job.jobId === 'string' ? started.job.jobId : undefined;
+      if (jobId && typeof started.job.pendingId === 'string') trackHalfJob(started.job.pendingId, jobId);
+      const job = await awaitJob(client, config, started.job, extra);
+      if (jobId) {
+        await settleHalfJob(config, jobId, job);
+        await settleCall(jobId, job);
+      }
+      if (chainOutcome(job) === 'failed') forgetStart(key);
+      return markReused(job, started, !!args.idempotencyKey);
     }),
   );
 
@@ -1151,12 +1203,6 @@ function boardRows(result: unknown): unknown[] {
   return Array.isArray(result) ? result : Array.isArray(value) ? value : [];
 }
 
-/** Board rows pass through unchanged after settling the maker halves posted as them. */
-function settled<T>(rows: T): T {
-  settleBoardRows(rows);
-  return rows;
-}
-
 /** The board's long-poll cap: NIGHTGATE holds an empty answer at most this long. */
 const BOARD_WAIT_MAX_MS = 25_000;
 
@@ -1184,6 +1230,14 @@ function listOffers(client: NightgateClient, args: {
  * tool errors (isError) with status + OData code so the agent can react
  * (e.g. 401 -> credentials, 429 -> back off) instead of crashing the call.
  */
+/** Masks secrets an SDK error or a URL may carry: access tokens in the query, project ids and full gateway or grant keys. */
+export function redact(text: string): string {
+  return text
+    .replace(/([?&](?:project_id|key|token|apikey)=)[^&\s"'`]+/gi, '$1<redacted>')
+    .replace(/\b(oda|ngat)_[A-Za-z0-9_-]{16,}/g, '$1_<redacted>')
+    .replace(/\b(night(?:preprod|preview|mainnet))[A-Za-z0-9]{16,}/g, '$1<redacted>');
+}
+
 export function wrapHandler(_client: NightgateClient) {
   return function run<A>(fn: (args: A, extra: ToolExtra) => Promise<unknown>) {
     return async (args: A, extra: ToolExtra): Promise<ToolResult> => {
@@ -1194,15 +1248,15 @@ export function wrapHandler(_client: NightgateClient) {
         const result = await callStage.run(stage, () => seedNotice.run(notice, () => fn(args, extra)));
         const seed = notice.createdFile ? seedCreated(notice.createdFile) : undefined;
         const out = seed && result && typeof result === 'object' && !Array.isArray(result) ? { ...result, seed } : result;
-        return { content: [{ type: 'text', text: JSON.stringify(out, null, 2) }] };
+        return { content: [{ type: 'text', text: redact(JSON.stringify(out, null, 2)) }] };
       } catch (err) {
         const seed = notice.createdFile ? seedCreated(notice.createdFile) : undefined;
         if (err instanceof NightgateApiError) {
           const detail = { httpStatus: err.status, code: err.code ?? null, message: err.message, ...(err.detail ?? {}), ...(seed ? { seed } : {}) };
-          return { content: [{ type: 'text', text: JSON.stringify(detail, null, 2) }], isError: true };
+          return { content: [{ type: 'text', text: redact(JSON.stringify(detail, null, 2)) }], isError: true };
         }
         const message = err instanceof Error ? err.message : String(err);
-        return { content: [{ type: 'text', text: seed ? `${message}\n${JSON.stringify({ seed }, null, 2)}` : message }], isError: true };
+        return { content: [{ type: 'text', text: redact(seed ? `${message}\n${JSON.stringify({ seed }, null, 2)}` : message) }], isError: true };
       } finally {
         stopProgress();
       }

@@ -46,7 +46,7 @@ Errors carry the server's HTTP status and `code` (`INVALID_ARGUMENT`, ...).
 
 | Field | Meaning |
 |---|---|
-| `status` | `succeeded`, `failed`, or `pending` when the job is still open after 5 minutes or its status cannot be read |
+| `status` | `succeeded`, `failed`, or `pending` when the job is still open after 5 minutes or its status cannot be read. A write waits for the block: `chainStatus` is `success`, or `failure`/`dropped` with `next` |
 | `txHash` | Ledger identifier of the transaction |
 | `transactionHash` | Hash the explorers show, null until indexed |
 | `result` | The job result, for a swap `swap`, for a mint `tokenType` |
@@ -54,6 +54,8 @@ Errors carry the server's HTTP status and `code` (`INVALID_ARGUMENT`, ...).
 | `statusError` | With `pending`: why the status could not be read |
 | `check` | `{ tool, args }`: the call that shows the effect on-chain |
 | `receipt` | A swap or transfer the block confirmed: the instance's signed statement of the chain facts and the terms. The tool waits for the block; null when that wait ran out first, the same call again fetches it |
+| `idempotencyKey` | The key the server got: the caller's, or one made here when none was given |
+| `deduplicated`, `dedupe` | The job an earlier identical call started; nothing new was sent |
 | `seed` | Only once, when this call created the seed file |
 
 `failed` with `CHAIN_EXECUTION_FAILED`: the transaction is on-chain but its
@@ -62,7 +64,17 @@ contract in that block. Run the tool again. It builds against the new state.
 
 A tool that was cut off, for example by a client timeout, or that came back
 `pending`: run it again with the same arguments. It picks up the job it
-started and submits nothing new, so there is no second fee.
+started and submits nothing new, so there is no second fee. The answer then
+says `deduplicated: true`. A second, separate call with the same arguments
+within an hour needs a new `idempotencyKey`.
+
+When the sponsor does not answer, the tool sends the same transaction up to
+three times with the same `idempotencyKey`. If no answer comes, the error names
+the key, and the same call again resends that transaction instead of building
+a new one, so the same coins are never spent twice.
+
+Key-like values in tool answers and errors are masked: `token=`, `key=`,
+`apikey=`, `project_id=`, full `oda_…` and `ngat_…` keys.
 
 While a call runs it sends MCP progress every 5 seconds, so a client that
 resets its request timeout on progress keeps the call open. Each message
@@ -138,8 +150,9 @@ file and so one identity. For separate identities, give each server its own
 
 Two wallets exchange two shielded tokens without a contract. Each side builds
 one half, the halves mirror each other, a sponsor merges them and pays the fee.
-Needs a Midnight indexer the swap wallet syncs its coins from
-(`NIGHTGATE_INDEXER_HTTP_URL`, `NIGHTGATE_INDEXER_WS_URL`).
+The swap wallet syncs its coins from a Midnight indexer: with a gateway key
+through the gateway's indexer lane (1 unit per query, 5 per session), on a
+direct instance from `NIGHTGATE_INDEXER_HTTP_URL` and `NIGHTGATE_INDEXER_WS_URL`.
 
 1. `get_swap_wallet`: per token type the balance of the free coins, their
    number, `spendable` and `pending`, what the halves built here bring back
@@ -162,7 +175,13 @@ Needs a Midnight indexer the swap wallet syncs its coins from
 - One half spends at most `NIGHTGATE_SWAP_MAX_INPUTS` coins, the smallest that
   fit. `give.amount` above `spendable` is refused before proving.
 - An offer fills once. Its coins stay reserved in the maker's wallet until the
-  swap lands or `revert_swap_offer` releases them.
+  swap lands or `revert_swap_offer` releases them, by the half's `id` or by the
+  board `offerId` of a closed offer. With `NIGHTGATE_SWAP_STATE_FILE` the built
+  halves are kept next to the state (`<file>.halves.json`), so a restart lists
+  them again (`restored`) and can still revert them. A maker half whose offer
+  expired or was retired 15 minutes ago, and that went into no job, is released
+  on its own at the next `get_swap_wallet` or board read (`released`).
+  `reserved` in `get_swap_wallet` is the SDK's own list of reserved coins.
 - `post_swap_offer` with `directed: true` returns a `takerSecret` once: only a
   taker who passes it to `take_swap_offer` or `sponsor_swap` gets the swap
   sponsored, so an invoice or an agreed deal goes to its counterparty alone.
@@ -191,18 +210,45 @@ Needs a Midnight indexer the swap wallet syncs its coins from
 - `burn_token({ contractAddress, name, amount, issuerKey? })` burns a factory
   token this wallet holds; without `issuerKey` the token is one this wallet
   minted. Same path as `mint_token`: built here, sponsored.
-- `call_contract({ package, contractAddress, circuit, args })` calls a circuit
-  on any contract whose lineage package is installed next to the server (laid
-  out like `@odatano/contract-<name>`). Arguments are JSON in circuit order;
-  `{"$bytes":"<hex>"}`, `{"$uint":"<n>"}` and `{"$coin":{"tokenType","amount"}}`
-  are tagged, a `$coin` is a shielded coin the circuit receives, funded from
-  this wallet, the one `get_swap_wallet` shows (needs the indexer variables;
-  the tool waits up to 20 s for the wallet's sync and otherwise says how far
-  it is). A call with a `$coin` is bound and goes through
-  `sponsorFinalizedTransaction`, one without through the parallel channel; a
-  shortfall names the coin asked for and what the synced wallet holds free.
-  Circuits that need witnesses beyond the contract's own are not reachable
-  here.
+- `call_contract({ package, contractAddress, circuit, args, payUnshielded? })`
+  calls a circuit on any contract whose lineage package is installed next to
+  the server (laid out like `@odatano/contract-<name>`). Arguments are JSON in
+  circuit order. Tagged values:
+  - `{"$bytes":"<hex>"}`, `{"$uint":"<n>"}`. A plain number must stay below
+    2^53; a larger one goes as `$uint`.
+  - `{"$coin":{"tokenType","amount"}}`: a shielded coin the circuit receives,
+    funded from this wallet, the one `get_swap_wallet` shows. A gateway key
+    syncs it through the gateway, a direct instance needs the indexer
+    variables. The tool waits up to 20 s for the sync and otherwise says how
+    far it is. A shortfall names the coin asked for and what the wallet holds
+    free.
+  - `{"$night":"<atoms>"}`: a NIGHT amount the circuit takes in
+    (`receiveUnshielded`, a deposit or a stake). The wallet syncs its NIGHT
+    coins and pays them in; the sponsor adds the fee only. `payUnshielded:
+    true` does the same for a circuit whose amount is no argument. Needs
+    `allowUnshieldedOffers` on the grant. One pay-in runs at a time per
+    server: a second one waits until the first landed or failed (at most an
+    hour), so both never pick the same coins.
+
+  A payout the circuit makes to this wallet (`sendUnshielded`, a claim, a
+  refund) needs nothing extra; NIGHTGATE 0.40.0 sponsors it. A call that funds
+  anything is bound and goes through `sponsorFinalizedTransaction`, one
+  without through the parallel channel. The coins a `$coin` call reserved are
+  listed in `get_swap_wallet` (role `call`) until the call landed; a call the
+  sponsor or the chain refused gives them back. `NIGHTGATE_CALL_PACKAGES`
+  limits which packages load.
+- Witnesses: when the package's `contract.json` names a module under
+  `witnesses`, `call_contract` imports it and calls
+  `createWitnesses({ secret, network, contractAddress })`. It returns
+  `{ witnesses, privateState? }`: the witness functions and the private state
+  they start from. `secret` is 32 bytes, HMAC-SHA256 of the seed over
+  `nightgate-mcp witnesses <package>`, so it is the same for every call of
+  one seed and package, differs per package, and the package never sees the
+  seed. The private state the witnesses return is kept per package and
+  contract once the call landed, so the next call starts from it
+  (`<state>.private.json`; bytes and big integers only, besides plain JSON).
+  One such call per contract runs at a time, so two never build on the same
+  private state.
 - A swap or transfer the block confirmed carries `receipt` in its result (the
   tool waits for the block, about a minute after the sponsor sent it; the same
   call again fetches a receipt that wait missed):

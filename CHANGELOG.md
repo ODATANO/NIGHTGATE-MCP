@@ -7,6 +7,82 @@ The README says which NIGHTGATE the current version needs.
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-10-31
+
+Needs NIGHTGATE 0.36.0; `send_token`, directed offers and receipts need 0.39.0,
+sponsored payouts from a contract 0.40.0.
+The wallet sync through the gateway needs a gateway that serves the indexer lane
+(api.odatano.dev does since 2026-10-29).
+
+### Changed
+
+- **The wallet syncs through the gateway.** With a gateway key (`oda_…`) and
+  no `NIGHTGATE_INDEXER_HTTP_URL` / `_WS_URL`, the swap wallet and a
+  `call_contract` with a `$coin` sync the wallet's coins through the gateway's
+  indexer lane (`/indexer/api/v4/graphql`, 1 unit per query, 5 per WebSocket
+  session). `post_swap_offer`, `take_swap_offer`, `send_token`, `burn_token`,
+  `get_swap_wallet` and a coin call used to refuse without the two variables;
+  they are now overrides for an own indexer, and a direct instance without one
+  is told so.
+- **A half that never landed gives its coins back, also after a restart.** The
+  halves built here are kept next to the state file (`<file>.halves.json`) and
+  come back as `restored` in `get_swap_wallet`; `revert_swap_offer` takes them
+  by `id`, or any board offer this wallet posted by `offerId`, reverting from the
+  board's copy of the half once the offer is closed. A maker half whose offer
+  expired or was retired 15 minutes ago and that went into no sponsor job is
+  released on its own at the next `get_swap_wallet` or board read (`released`).
+  `get_swap_wallet` also lists `reserved`, the SDK's reserved coins with their
+  ttl. Before, a process that ended with a half in flight left its coins
+  reserved in the state file until a sync from genesis.
+- **`call_contract` pays NIGHT into a contract.** `{"$night":"<atoms>"}` or
+  `payUnshielded: true` syncs the wallet's NIGHT coins (`<state>.unshielded`)
+  and pays a `receiveUnshielded` circuit from them; the sponsor adds the fee.
+  Needs `allowUnshieldedOffers` on the grant. A payout to this wallet
+  (`sendUnshielded`) needs nothing extra with NIGHTGATE 0.40.0.
+- **Witnesses from the lineage package.** A `witnesses` module named in
+  `contract.json` exports `createWitnesses({ secret, network, contractAddress })`
+  and returns `{ witnesses, privateState? }`; `secret` is derived from the seed
+  per package. Contracts that identify the caller through a witness work. The
+  private state the witnesses return is kept per package and contract once the
+  call landed (`<state>.private.json`); one such call per contract runs at a
+  time.
+- One NIGHT pay-in runs at a time per server, so two never pick the same
+  coins; a refused or failed one releases its NIGHT through `builder.revert`
+  (`@odatano/nightgate-tx` 0.20.1).
+- `revert_swap_offer` by `offerId` checks the board status first: an open
+  offer is not reverted, a filled one leaves the list.
+- **An identical write within an hour is reported, not repeated silently.** The
+  dedupe key includes `idempotencyKey`; a repeat returns the first job with
+  `deduplicated: true`. Every write sends an `idempotencyKey` (the caller's, or
+  one made here). A send without an answer is repeated with the same body, and
+  a later identical call resends that transaction instead of building again.
+- **Every write waits for the block.** A job counts as landed when the chain
+  reports `success`; `failure` or `dropped` comes with `next`. A swap half or
+  transfer the chain refused stays in `get_swap_wallet` with `chainStatus` for
+  `revert_swap_offer`.
+- **Coins of a `$coin` call come back.** The call is listed in
+  `get_swap_wallet` (role `call`) until it landed; a call the sponsor or the
+  chain refused reverts its reservation.
+- `call_contract` refuses a number above 2^53 and points at `$uint`, and
+  arguments nested deeper than 16 levels. `NIGHTGATE_CALL_PACKAGES` limits the
+  packages it loads.
+- No default node URL: a builder with an own indexer and no
+  `NIGHTGATE_NODE_URL` reads contract state through the API.
+- The state file is locked to one process (`<file>.lock`); temp files get
+  unique names, directories mode 0700.
+- Tool answers and errors mask `token=`, `key=`, `apikey=`, `project_id=` and
+  full `oda_`/`ngat_` keys. OData string literals are percent-encoded. A key or password goes to
+  plain `http` only on this machine, or with `NIGHTGATE_ALLOW_PLAIN_HTTP=1`;
+  this holds for `ODATANO_ANALYTICS_URL` as well.
+- A call the chain refused can be run again at once; with the caller's
+  `idempotencyKey` the rebuild gets the server key `<key>:retry-<n>`, also
+  when the server already knows the key from before a restart.
+- `npm run test:unit`: unit tests with `node --test`.
+- `retire_swap_offer` on a closed offer answers its status instead of an error
+  (NIGHTGATE 0.40.0).
+- Depends on `@odatano/nightgate-tx` 0.20.1 (`gatewayIndexerUrls`, swap wallet
+  `revert` and `pending`, `builder.revert`).
+
 ## [0.20.3] - 2026-10-29
 
 Needs NIGHTGATE 0.36.0; `send_token`, directed offers and receipts need 0.39.0.

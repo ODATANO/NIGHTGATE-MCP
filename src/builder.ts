@@ -1,5 +1,6 @@
 // Builds, proves and signs a vault call here with the caller seed, via the @odatano/nightgate-tx txbuilder.
 // The seed and the attestation secret never travel; the sponsor tools submit the fee-unpaid result.
+import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { builderChainOptions, type NightgateMcpConfig } from './config.js';
@@ -9,15 +10,8 @@ import { ensureSeed } from './seed.js';
 import { setStage } from './jobs.js';
 
 /**
- * Call kinds this tool can prepare; one per attestation-vault helper.
- *
- * The prove* entries are what lets a third party make a ZK claim with NO
- * wallet on the server: the witness (the field value, its salt, the
- * inclusion path) is consumed here in the caller's own process and only the
- * finished transaction travels. The server-side `issueField*Attestation`
- * actions do the same work with a SERVER wallet as the attester, which is
- * the wrong shape for anyone but the operator: it would put someone else's
- * key in our custody and stamp every claim with the same attester id.
+ * Call kinds this tool can prepare, one per attestation-vault helper. A prove* call keeps the private inputs
+ * (field value, salt, inclusion path) in this process, so a caller makes a ZK claim under its own attester id.
  */
 export const BUILDABLE_CALLS = [
   'attest',
@@ -35,11 +29,8 @@ export const BUILDABLE_CALLS = [
 export type BuildableCall = (typeof BUILDABLE_CALLS)[number];
 
 /**
- * Vault lineages the local builder can load. Each needs its OWN compiled
- * contract class and its own `/zk-config`, because the width is baked into
- * the circuits. Picking the lineage also sets the slot width the prove*
- * calls fold their inclusion paths over (16 or 32), so the address and the
- * ref must belong together.
+ * Vault lineages the local builder can load. Each has its own contract class and prover keys, because the
+ * slot width (16 or 32) is part of the circuits; the address and the ref must belong together.
  */
 export const BUILDABLE_ARTIFACTS = ['attestation-vault', 'attestation-vault-32'] as const;
 export type BuildableArtifact = (typeof BUILDABLE_ARTIFACTS)[number];
@@ -117,12 +108,7 @@ async function loadModules(ref: BuildableArtifact = DEFAULT_ARTIFACT): Promise<T
   return entry;
 }
 
-/**
- * One builder per VAULT LINEAGE (the seed is fixed, the circuits are not);
- * created on first use. A 16-slot and a 32-slot vault need different
- * contract classes, different prover keys and therefore separate cache
- * directories, so they cannot share an instance.
- */
+/** One builder per vault lineage, created on first use: the two slot widths need separate classes, keys and caches. */
 async function getBuilder(config: NightgateMcpConfig, ref: BuildableArtifact = DEFAULT_ARTIFACT): Promise<any> {
   await ensureSeed(config);
   let entry = builders.get(ref);
@@ -285,7 +271,7 @@ export interface SeedIdentity {
 /** The public identity of the seed, a pure derivation: no builder, no indexer, no zk assets. */
 export async function seedIdentity(config: NightgateMcpConfig): Promise<SeedIdentity> {
   const seedHex = await ensureSeed(config);
-  const key = `${config.network}:${seedHex.toLowerCase()}`;
+  const key = `${config.network}:${createHash('sha256').update(seedHex.toLowerCase()).digest('hex')}`;
   let entry = identities.get(key);
   if (!entry) {
     entry = (async () => {

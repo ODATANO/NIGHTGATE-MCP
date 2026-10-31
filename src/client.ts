@@ -15,10 +15,8 @@ export class NightgateApiError extends Error {
 }
 
 /**
- * Two error shapes reach the client: CAP's `{ error: { code, message } }`
- * from NIGHTGATE itself, and the ODATANO gateway's `{ error: "<text>",
- * ...detail }` (401 key problems, 402 units exhausted with a top-up hint,
- * 403 closed action or product not on the key, 429 with Retry-After).
+ * Reads both error shapes: CAP's `{ error: { code, message } }` from NIGHTGATE, and the gateway's
+ * `{ error: "<text>", ...detail }` (401 key, 402 units with a top-up hint, 403 not on the key, 429 Retry-After).
  */
 export function apiError(status: number, payload: unknown, headers: Headers, fallback: string): NightgateApiError {
   const body = (payload && typeof payload === 'object' ? payload : {}) as Record<string, unknown>;
@@ -134,12 +132,12 @@ export class NightgateClient {
     return this.config.analyticsUrl;
   }
 
-  /** GET <astra>/<Entity>?$filter=... â the ready-made views (KeyFigures, BlocksDaily, TopBlockProducers, ...). */
+  /** GET <astra>/<Entity>?$filter=...: the ready-made views (KeyFigures, BlocksDaily, TopBlockProducers, ...). */
   async analyticsQuery(entity: string, query: EntityQuery = {}): Promise<unknown> {
     return this.request('GET', `${this.analyticsUrl()}/${entity}${buildQueryString(query)}`);
   }
 
-  /** GET <astra>/<name>(p1=...,p2=...) â getWindow, getSeries, compare, getAnomalies. */
+  /** GET <astra>/<name>(p1=...,p2=...): getWindow, getSeries, compare, getAnomalies. */
   async analyticsFunction(name: string, params: Record<string, FunctionParam>): Promise<unknown> {
     return this.request('GET', `${this.analyticsUrl()}/${functionCall(name, params)}`);
   }
@@ -219,11 +217,11 @@ function functionCall(name: string, params: Record<string, FunctionParam>): stri
   return `${name}(${parts.join(',')})`;
 }
 
-/** Encode a JS value as an OData URL literal (strings quoted, '' -> escaped). */
-function odataLiteral(value: string | number | boolean | Int64Literal | RawLiteral): string {
+/** Encode a JS value as an OData URL literal: strings quoted with '' escaped, then percent-encoded for the path. */
+export function odataLiteral(value: string | number | boolean | Int64Literal | RawLiteral): string {
   if (typeof value === 'number' || typeof value === 'boolean') return String(value);
   if (typeof value === 'object') return '$raw' in value ? value.$raw : value.$int64;
-  return `'${value.replace(/'/g, "''")}'`;
+  return `'${encodeURIComponent(value.replace(/'/g, "''"))}'`;
 }
 
 /** Drop @odata.* metadata keys so tool output stays clean for the model. */

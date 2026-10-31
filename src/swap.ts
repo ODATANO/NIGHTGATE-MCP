@@ -1,16 +1,15 @@
 /**
- * Shielded swaps, the local side: one wallet that holds the shielded coins of
- * `NIGHTGATE_SEED_HEX` builds swap halves and takes offers. It wraps the swap
- * wallet of `@odatano/nightgate-tx`; the fee is the sponsor's, so the wallet
- * needs neither NIGHT nor dust. Its coins sync from a configured Midnight indexer.
+ * The local side of shielded swaps and transfers: one wallet of the seed builds halves and takes offers.
+ * The sponsor pays the fee, so the wallet needs neither NIGHT nor dust.
  */
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
+import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
-import type { NightgateMcpConfig } from './config.js';
+import { NO_INDEXER, walletIndexer, type NightgateMcpConfig } from './config.js';
 import { txExport } from './tx-module.js';
 import { ensureSeed } from './seed.js';
-import { setStage } from './jobs.js';
+import { chainOutcome, setStage } from './jobs.js';
 
 export interface SwapLeg {
   tokenType: string;
@@ -80,10 +79,20 @@ interface OpenWallet {
 }
 
 let open: Promise<OpenWallet> | undefined;
+/** What a contract call built here takes from this wallet. */
+export interface CallTermsOut {
+  contractAddress: string;
+  circuit: string;
+  coins: Array<{ tokenType: string; amount: string }>;
+}
+
 interface PendingHalf {
   revert: () => Promise<void>;
-  terms: SwapTermsOut | TransferTermsOut;
-  role: 'maker' | 'taker' | 'transfer';
+  terms: SwapTermsOut | TransferTermsOut | CallTermsOut;
+  role: 'maker' | 'taker' | 'transfer' | 'call';
+  /** The half's transaction as base64, so a later process can still revert it. */
+  bytes: string;
+  builtAt: number;
   /** Both halves of a taken offer, so it can be submitted by id. */
   halves?: { makerHalfB64: string; takerHalfB64: string };
   /** The sponsor job the half went into. */
@@ -93,12 +102,107 @@ interface PendingHalf {
   boardStatus?: string;
   /** When it was posted, in ms. */
   postedAt?: number;
+  /** When the board closed the offer (expired or retired), in ms. */
+  closedAt?: number;
+  /** Loaded from the halves file of an earlier process. */
+  restored?: boolean;
+  /** `failure` or `dropped` when the chain refused the transaction it went into; its coins can be reverted. */
+  chainStatus?: string;
 }
 /** Halves built here whose swap has not landed, by id. */
 const pending = new Map<string, PendingHalf>();
 
 const halfIdOf = (bytes: Uint8Array): string => createHash('sha256').update(bytes).digest('hex').slice(0, 32);
 const halfId = (halfB64: string): string => halfIdOf(Buffer.from(halfB64, 'base64'));
+
+/** What the halves file keeps of a pending half: everything but the revert closure. */
+type StoredHalf = Omit<PendingHalf, 'revert' | 'restored'>;
+
+/** The halves file next to the state file; none without a state file. */
+const halvesPath = (config: NightgateMcpConfig): string | undefined => (config.swapStateFile ? `${config.swapStateFile}.halves.json` : undefined);
+
+let halvesFile: string | undefined;
+let persistTimer: NodeJS.Timeout | undefined;
+
+/** Writes the pending halves to their file soon; several changes in a row make one write. */
+function schedulePersist(): void {
+  if (!halvesFile || persistTimer) return;
+  persistTimer = setTimeout(() => {
+    persistTimer = undefined;
+    void persistHalves().catch((err) => console.error(`nightgate-mcp: pending halves not saved: ${(err as Error).message}`));
+  }, 0);
+}
+
+/** Writes a file readable by the owner only: next to itself under a name of this write, then renamed. */
+async function writePrivate(path: string, text: string): Promise<void> {
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  const tmp = `${path}.${process.pid}.${randomBytes(4).toString('hex')}.part`;
+  await writeFile(tmp, text, { mode: 0o600 });
+  await rename(tmp, path);
+  await chmod(path, 0o600).catch(() => { /* not every file system has modes */ });
+}
+
+async function persistHalves(): Promise<void> {
+  if (!halvesFile) return;
+  const rows: Array<StoredHalf & { id: string }> = [...pending.entries()].map(([id, { revert: _r, restored: _s, ...rest }]) => ({ id, ...rest }));
+  await writePrivate(halvesFile, JSON.stringify(rows));
+}
+
+let lockedFile: string | undefined;
+
+/** True while a process with this pid runs. */
+function alive(pid: number): boolean {
+  try { process.kill(pid, 0); return true; } catch (err) { return (err as NodeJS.ErrnoException)?.code === 'EPERM'; }
+}
+
+/** Claims the state file for this process, so two servers never overwrite each other's coins. The lock file is created atomically. */
+export function lockStateFile(path: string | undefined): void {
+  if (!path || lockedFile === path) return;
+  const lock = `${path}.lock`;
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  for (let tries = 0; ; tries++) {
+    try {
+      writeFileSync(lock, String(process.pid), { mode: 0o600, flag: 'wx' });
+      break;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code !== 'EEXIST' || tries > 0) throw err;
+      let owner: number | undefined;
+      try { owner = Number(readFileSync(lock, 'utf8').trim()); } catch { /* removed meanwhile */ }
+      if (owner && owner !== process.pid && alive(owner)) {
+        throw new Error(`NIGHTGATE_SWAP_STATE_FILE ${path} is in use by another process (pid ${owner}); give every MCP server its own state file, ` +
+          `or delete ${lock} if that process is no MCP server`);
+      }
+      try { unlinkSync(lock); } catch { /* removed meanwhile */ }
+    }
+  }
+  lockedFile = path;
+  process.once('exit', () => { try { if (Number(readFileSync(lock, 'utf8').trim()) === process.pid) unlinkSync(lock); } catch { /* gone already */ } });
+}
+
+/** The halves an earlier process left in the file, each revertable through the wallet from its bytes. */
+async function restoreHalves(path: string | undefined, wallet: any): Promise<void> {
+  if (!path) return;
+  let text: string;
+  try {
+    text = await readFile(path, 'utf8');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') return;
+    throw new Error(`pending halves ${path} is not readable: ${(err as Error).message}`);
+  }
+  let rows: Array<StoredHalf & { id: string }>;
+  try { rows = JSON.parse(text); } catch { throw new Error(`pending halves ${path} is not JSON; move it aside`); }
+  for (const { id, ...rest } of rows) {
+    if (pending.has(id) || typeof rest.bytes !== 'string') continue;
+    pending.set(id, {
+      ...rest,
+      restored: true,
+      revert: async () => {
+        if (typeof wallet.revert !== 'function') throw new Error('reverting a half of an earlier process needs @odatano/nightgate-tx >= 0.20.0 next to the MCP server');
+        await wallet.revert(rest.bytes);
+      },
+    });
+  }
+}
 
 async function readState(path: string | undefined): Promise<string | undefined> {
   if (!path) return undefined;
@@ -111,23 +215,37 @@ async function readState(path: string | undefined): Promise<string | undefined> 
   }
 }
 
-/** The state holds the wallet's coins: written next to itself, then renamed, readable by the owner only. */
+/** The state holds the wallet's coins, so it is written readable by the owner only. */
 async function writeState(path: string | undefined, wallet: any): Promise<void> {
   if (!path) return;
-  const state = String(await wallet.serializeState());
-  await mkdir(dirname(path), { recursive: true });
-  const tmp = `${path}.part`;
-  await writeFile(tmp, state, { mode: 0o600 });
-  await rename(tmp, path);
-  await chmod(path, 0o600).catch(() => { /* not every file system has modes */ });
+  await writePrivate(path, String(await wallet.serializeState()));
+}
+
+/** Saved state of a builder's NIGHT coins, next to the swap wallet's state file. */
+export async function readUnshieldedState(config: NightgateMcpConfig): Promise<string | undefined> {
+  return readState(config.swapStateFile ? `${config.swapStateFile}.unshielded` : undefined);
+}
+
+export async function writeUnshieldedState(config: NightgateMcpConfig, state: string): Promise<void> {
+  if (config.swapStateFile) await writePrivate(`${config.swapStateFile}.unshielded`, state);
+}
+
+/** The saved private states of contract calls, as tagged JSON by package and contract. */
+export async function readPrivateStates(config: NightgateMcpConfig): Promise<Record<string, unknown> | undefined> {
+  const text = await readState(config.swapStateFile ? `${config.swapStateFile}.private.json` : undefined);
+  if (!text) return undefined;
+  try { return JSON.parse(text) as Record<string, unknown>; } catch { throw new Error(`${config.swapStateFile}.private.json is not JSON; move it aside`); }
+}
+
+export async function writePrivateStates(config: NightgateMcpConfig, states: Record<string, unknown>): Promise<void> {
+  if (config.swapStateFile) await writePrivate(`${config.swapStateFile}.private.json`, JSON.stringify(states));
 }
 
 async function openWallet(config: NightgateMcpConfig): Promise<OpenWallet> {
   await ensureSeed(config);
-  const { indexerHttpUrl, indexerWsUrl } = config;
-  if (!indexerHttpUrl || !indexerWsUrl) {
-    throw new Error('swaps need NIGHTGATE_INDEXER_HTTP_URL and NIGHTGATE_INDEXER_WS_URL in the MCP server environment: a Midnight indexer the swap wallet syncs its coins from');
-  }
+  const indexer = await walletIndexer(config);
+  if (!indexer) throw new Error(NO_INDEXER);
+  lockStateFile(config.swapStateFile);
   open ??= (async (): Promise<OpenWallet> => {
     try {
       const { createSwapWallet } = await loadSwapModule();
@@ -135,13 +253,14 @@ async function openWallet(config: NightgateMcpConfig): Promise<OpenWallet> {
       const wallet = await createSwapWallet({
         seedHex: config.seedHex,
         networkId: config.network,
-        indexerHttpUrl,
-        indexerWsUrl,
+        ...indexer,
         ...(config.nodeUrl ? { nodeUrl: config.nodeUrl } : {}),
         ...(config.proofServerUrl ? { provingMode: 'server', proofServerUrl: config.proofServerUrl } : {}),
         ...(config.swapMaxInputs ? { maxInputs: config.swapMaxInputs } : {}),
         ...(walletState ? { walletState } : {}),
       });
+      halvesFile = halvesPath(config);
+      await restoreHalves(halvesFile, wallet);
       const entry: OpenWallet = { wallet, synced: Promise.resolve(), isSynced: false, syncError: null, startedAt: Date.now(), resumed: !!walletState };
       entry.synced = (async () => {
         try {
@@ -234,10 +353,48 @@ export async function swapWalletInfo(config: NightgateMcpConfig): Promise<Record
     tokens.push({ tokenType, balance: t.balance.toString(), coins: t.coins, spendable: String(await wallet.spendable(tokenType)), pending: t.pending.toString() });
   }
   const pendingHalves = [...pending.entries()].map(([id, p]) => ({
-    id, role: p.role, ...(p.jobId ? { jobId: p.jobId } : {}),
-    ...(p.offerId ? { offerId: p.offerId, boardStatus: p.boardStatus ?? 'open' } : {}), ...p.terms,
+    id, role: p.role, builtAt: new Date(p.builtAt).toISOString(), ...(p.restored ? { restored: true } : {}), ...(p.jobId ? { jobId: p.jobId } : {}),
+    ...(p.offerId ? { offerId: p.offerId, boardStatus: p.boardStatus ?? 'open' } : {}),
+    ...(p.closedAt ? { closedAt: new Date(p.closedAt).toISOString() } : {}), ...(p.chainStatus ? { chainStatus: p.chainStatus } : {}), ...p.terms,
   }));
-  return { ...base, synced: true, tokens, pendingHalves };
+  // the SDK's own list of what is reserved, with the instant it stops waiting for each coin
+  const reserved: unknown[] | undefined = typeof wallet.pending === 'function'
+    ? (await wallet.pending()).map((c: { tokenType: string; amount: bigint; ttl: string | null }) => ({ tokenType: c.tokenType, amount: c.amount.toString(), ttl: c.ttl }))
+    : undefined;
+  return { ...base, synced: true, tokens, pendingHalves, ...(reserved ? { reserved } : {}) };
+}
+
+/** How long a closed offer's half stays before its coins come back on their own: a swap taken just before the close may still land. */
+export const LAPSED_HALF_GRACE_MS = 15 * 60_000;
+
+let releasing: Promise<ReleasedHalf[]> | undefined;
+export interface ReleasedHalf { id: string; role: PendingHalf['role']; offerId?: string; boardStatus?: string; terms: PendingHalf['terms'] }
+
+// Reverts the maker halves whose board offer is expired or retired for longer than the grace period and
+// that went into no sponsor job: nobody can take them any more, so their coins come back.
+export async function releaseLapsedHalves(config: NightgateMcpConfig): Promise<ReleasedHalf[]> {
+  releasing ??= (async (): Promise<ReleasedHalf[]> => {
+    const now = Date.now();
+    const released: ReleasedHalf[] = [];
+    for (const [id, half] of [...pending.entries()]) {
+      const lapsed = half.offerId && !half.jobId && (half.boardStatus === 'expired' || half.boardStatus === 'retired') && half.closedAt && now - half.closedAt >= LAPSED_HALF_GRACE_MS;
+      if (!lapsed) continue;
+      try {
+        await half.revert();
+        pending.delete(id);
+        released.push({ id, role: half.role, offerId: half.offerId, boardStatus: half.boardStatus, terms: half.terms });
+      } catch (err) {
+        console.error(`nightgate-mcp: half ${id} of offer ${half.offerId} not released: ${(err as Error).message}`);
+      }
+    }
+    if (released.length) {
+      schedulePersist();
+      const entry = await openWallet(config);
+      await writeState(config.swapStateFile, entry.wallet).catch(() => { /* the next save carries it */ });
+    }
+    return released;
+  })().finally(() => { releasing = undefined; });
+  return releasing;
 }
 
 export interface BuiltOffer {
@@ -259,7 +416,8 @@ export async function buildOffer(config: NightgateMcpConfig, input: { give: Swap
   const half = await wallet.buildHalf({ give: input.give, want: input.want, bind: input.bind !== false });
   const terms = termsOut(half.terms);
   const id = halfId(half.halfB64);
-  pending.set(id, { revert: half.revert, terms, role: 'maker' });
+  pending.set(id, { revert: half.revert, terms, role: 'maker', bytes: half.halfB64, builtAt: Date.now() });
+  schedulePersist();
   await writeState(config.swapStateFile, wallet).catch(() => { /* the half is built; the state follows at the next save */ });
   return {
     id, ...(half.offer ? { offer: half.offer } : {}), halfB64: half.halfB64, bound: half.bound === true,
@@ -296,7 +454,8 @@ export async function buildTransfer(config: NightgateMcpConfig, input: { tokenTy
   const built = await wallet.buildTransfer({ tokenType: input.tokenType, amount: input.amount, to: input.to, bind: input.bind !== false });
   const terms: TransferTermsOut = { tokenType: String(built.terms.tokenType), amount: String(built.terms.amount), to: String(built.terms.to) };
   const id = halfId(built.txB64);
-  pending.set(id, { revert: built.revert, terms, role: 'transfer' });
+  pending.set(id, { revert: built.revert, terms, role: 'transfer', bytes: built.txB64, builtAt: Date.now() });
+  schedulePersist();
   await writeState(config.swapStateFile, wallet).catch(() => { /* the transfer is built; the state follows at the next save */ });
   return { id, transferTxB64: built.txB64, bound: built.bound === true, serializedBytes: Number(built.serializedBytes), inputs: Number(built.inputs), terms, buildMs: Date.now() - t0 };
 }
@@ -319,7 +478,8 @@ export async function takeOffer(config: NightgateMcpConfig, input: { offer: stri
   const taken = await wallet.takeOffer({ offer: input.offer, ...(input.expect ? { expect: input.expect } : {}) });
   const terms = termsOut(taken.terms);
   const id = halfId(taken.takerHalfB64);
-  pending.set(id, { revert: taken.revert, terms, role: 'taker', halves: { makerHalfB64: taken.makerHalfB64, takerHalfB64: taken.takerHalfB64 } });
+  pending.set(id, { revert: taken.revert, terms, role: 'taker', bytes: taken.takerHalfB64, builtAt: Date.now(), halves: { makerHalfB64: taken.makerHalfB64, takerHalfB64: taken.takerHalfB64 } });
+  schedulePersist();
   await writeState(config.swapStateFile, wallet).catch(() => { /* as above */ });
   return { id, makerHalfB64: taken.makerHalfB64, takerHalfB64: taken.takerHalfB64, bound: taken.bound === true, terms, buildMs: Date.now() - t0 };
 }
@@ -327,12 +487,31 @@ export async function takeOffer(config: NightgateMcpConfig, input: { offer: stri
 /** Releases the coins of a half built here that is not going to be handed over. */
 export async function revertHalf(config: NightgateMcpConfig, id: string): Promise<{ id: string; reverted: true }> {
   const half = pending.get(id);
-  if (!half) throw new Error(`no half with id ${id} was built by this server process (ids are listed by get_swap_wallet)`);
+  if (!half) throw new Error(`no half with id ${id} is held by this server (ids are listed by get_swap_wallet, also the ones restored from an earlier process)`);
   await half.revert();
   pending.delete(id);
-  const entry = await openWallet(config);
-  await writeState(config.swapStateFile, entry.wallet).catch(() => { /* as above */ });
+  schedulePersist();
+  if (config.swapStateFile) await writeState(config.swapStateFile, (await openWallet(config)).wallet).catch(() => { /* as above */ });
   return { id, reverted: true };
+}
+
+// Releases the coins behind a board offer this wallet posted, from the board's copy of the half when
+// no process holds it any more. Only for a closed offer: an open one could still be taken.
+export async function revertOffer(config: NightgateMcpConfig, offerId: string, row: { status?: unknown; offer?: unknown }): Promise<{ offerId: string; id?: string; reverted: true }> {
+  const held = [...pending.entries()].find(([, p]) => p.offerId === offerId);
+  const status = String(row.status ?? '');
+  if (status === 'filled') {
+    if (held) { pending.delete(held[0]); schedulePersist(); }
+    throw new Error(`offer ${offerId} filled: the swap landed and spent the half's coins, nothing to revert`);
+  }
+  if (status === 'open') throw new Error(`offer ${offerId} is still open and could be taken: retire_swap_offer first, or wait for its expiry`);
+  if (held) return { offerId, ...(await revertHalf(config, held[0])) };
+  if (typeof row.offer !== 'string' || !row.offer) throw new Error(`offer ${offerId} carries no half to revert`);
+  const entry = await openWallet(config);
+  if (typeof entry.wallet.revert !== 'function') throw new Error('reverting from the board needs @odatano/nightgate-tx >= 0.20.0 next to the MCP server');
+  await entry.wallet.revert(row.offer);
+  await writeState(config.swapStateFile, entry.wallet).catch(() => { /* as above */ });
+  return { offerId, reverted: true };
 }
 
 /** Both halves of an offer taken here, for a submission by id. */
@@ -346,18 +525,43 @@ export function takenHalves(id: string): { makerHalfB64: string; takerHalfB64: s
 /** Remembers the sponsor job a half went into. An id this process does not hold is ignored. */
 export function trackHalfJob(id: string, jobId: unknown): void {
   const half = pending.get(id);
-  if (half && typeof jobId === 'string') half.jobId = jobId;
+  if (half && typeof jobId === 'string') { half.jobId = jobId; delete half.chainStatus; schedulePersist(); }
 }
 
-/** A landed swap spent its coins: its half is no longer pending. A failed one stays, so it can be reverted. */
 /** Job ids of the halves still listed, so the caller can ask whether their swap landed. */
 export function halfJobIds(): string[] {
-  return [...new Set([...pending.values()].map((p) => p.jobId).filter((j): j is string => !!j))];
+  return [...new Set([...pending.values()].filter((p) => !p.chainStatus).map((p) => p.jobId).filter((j): j is string => !!j))];
 }
 
-export function settleHalfJob(jobId: string, status: unknown): void {
-  if (status !== 'succeeded') return;
-  for (const [id, half] of pending) if (half.jobId === jobId) pending.delete(id);
+/**
+ * A half or call whose transaction landed spent its coins and leaves the list. One the chain refused stays,
+ * marked with the chain status: a swap half for revert_swap_offer, a contract call is released here.
+ */
+export async function settleHalfJob(config: NightgateMcpConfig, jobId: string, job: Record<string, unknown>): Promise<void> {
+  const outcome = chainOutcome(job);
+  if (outcome === 'unknown') return;
+  for (const [id, half] of [...pending.entries()]) {
+    if (half.jobId !== jobId) continue;
+    if (outcome === 'landed') { pending.delete(id); schedulePersist(); continue; }
+    if (half.role === 'call') { await revertHalf(config, id).catch((err) => console.error(`nightgate-mcp: coins of call ${id} not released: ${(err as Error).message}`)); continue; }
+    half.chainStatus = String(job.chainStatus ?? job.status);
+    schedulePersist();
+  }
+}
+
+/** Lists a bound contract call whose `$coin` arguments reserved coins, so they come back if it never lands. */
+export async function trackCall(config: NightgateMcpConfig, wallet: any, txB64: string, terms: CallTermsOut): Promise<string> {
+  const id = halfId(txB64);
+  pending.set(id, {
+    revert: async () => {
+      if (typeof wallet.revert !== 'function') throw new Error('releasing the coins of a call needs @odatano/nightgate-tx >= 0.20.0 next to the MCP server');
+      await wallet.revert(txB64);
+    },
+    terms, role: 'call', bytes: txB64, builtAt: Date.now(),
+  });
+  schedulePersist();
+  await writeState(config.swapStateFile, wallet).catch(() => { /* the call is listed; the state follows at the next save */ });
+  return id;
 }
 
 /** Ties a maker half built here to the board entry it was posted as; any other offer is ignored. */
@@ -365,7 +569,7 @@ export async function trackPostedHalf(offer: string, offerId: unknown): Promise<
   if (typeof offerId !== 'string' || ![...pending.values()].some((p) => p.role === 'maker')) return;
   const { decodeOffer } = await loadSwapModule();
   const half = pending.get(halfIdOf((await decodeOffer(offer)).bytes));
-  if (half?.role === 'maker') { half.offerId = offerId; half.postedAt = Date.now(); }
+  if (half?.role === 'maker') { half.offerId = offerId; half.postedAt = Date.now(); schedulePersist(); }
 }
 
 /** Board entries of the maker halves held here. */
@@ -379,20 +583,23 @@ export function earliestPostedAt(): number | undefined {
   return times.length ? Math.min(...times) : undefined;
 }
 
-/**
- * Board rows (one, an array or an OData collection) settle the halves posted as them:
- * a filled offer spent the half's coins, so it leaves; an expired or retired one stays revertable.
- */
+// Board rows (one, an array or an OData collection) settle the halves posted as them: a filled offer spent
+// the half's coins, so it leaves; an expired or retired one is noted with its close and released after the grace.
 export function settleBoardRows(result: unknown): void {
   const value = (result as { value?: unknown })?.value;
   const rows = Array.isArray(result) ? result : Array.isArray(value) ? value : [result];
   for (const row of rows) {
-    const { offerId, status } = (row ?? {}) as { offerId?: unknown; status?: unknown };
+    const { offerId, status, closedAt, expiresAt } = (row ?? {}) as { offerId?: unknown; status?: unknown; closedAt?: unknown; expiresAt?: unknown };
     if (typeof offerId !== 'string' || typeof status !== 'string') continue;
     for (const [id, half] of pending) {
       if (half.offerId !== offerId) continue;
-      if (status === 'filled') pending.delete(id);
-      else half.boardStatus = status;
+      if (status === 'filled') { pending.delete(id); schedulePersist(); continue; }
+      half.boardStatus = status;
+      if (status === 'expired' || status === 'retired') {
+        const stamp = Date.parse(String(closedAt ?? expiresAt ?? ''));
+        half.closedAt = Number.isFinite(stamp) ? stamp : (half.closedAt ?? Date.now());
+        schedulePersist();
+      }
     }
   }
 }
@@ -401,7 +608,10 @@ export function settleBoardRows(result: unknown): void {
 export async function closeSwapWallet(): Promise<void> {
   const current = open;
   open = undefined;
+  if (persistTimer) { clearTimeout(persistTimer); persistTimer = undefined; }
+  await persistHalves().catch(() => { /* the file keeps its last state */ });
   pending.clear();
+  halvesFile = undefined;
   if (!current) return;
   try { await (await current).wallet.close?.(); } catch { /* best effort */ }
 }
@@ -411,4 +621,5 @@ export function __setSwapModuleForTests(mod: TxSwapModule | undefined): void {
   modulePromise = mod ? Promise.resolve(mod) : undefined;
   open = undefined;
   pending.clear();
+  halvesFile = undefined;
 }

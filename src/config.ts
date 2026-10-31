@@ -1,9 +1,8 @@
+import { txExport } from './tx-module.js';
+
 /**
- * Server configuration, environment-driven. The connection variables are the
- * same for every ODATANO MCP server (ODATANO_ACCESS_*): one key from
- * https://api.preprod.odatano.dev configures the Midnight and the Cardano server alike.
- * A direct NIGHTGATE instance (local `cds watch`, an own deployment) is reached
- * by pointing ODATANO_ACCESS_URL at it.
+ * Server configuration from the environment. The connection variables (ODATANO_ACCESS_*) are the same for
+ * every ODATANO MCP server; ODATANO_ACCESS_URL points at the gateway or at a direct NIGHTGATE instance.
  */
 export interface NightgateMcpConfig {
   /** Base URL: the ODATANO gateway (default https://api.preprod.odatano.dev) or a direct NIGHTGATE host app. */
@@ -51,6 +50,15 @@ export interface NightgateMcpConfig {
   swapStateFile?: string;
   /** Most coins one swap half spends; default the builder's (4, the sponsor's default). */
   swapMaxInputs?: number;
+
+  // ---- call_contract ----
+  /** The lineage packages call_contract may load, from NIGHTGATE_CALL_PACKAGES; every installed one when unset. */
+  callPackages?: string[];
+}
+
+/** True for a host that never leaves the machine. */
+function loopback(hostname: string): boolean {
+  return hostname === 'localhost' || hostname === '[::1]' || hostname === '::1' || /^127\./.test(hostname);
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): NightgateMcpConfig {
@@ -74,6 +82,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): NightgateMcpCo
   const analyticsUrl = (env.ODATANO_ANALYTICS_URL || `${baseUrl}/odata/v4/analytics`).replace(/\/+$/, '');
   const token = env.ODATANO_ACCESS_KEY || undefined;
   const username = env.ODATANO_ACCESS_USER || undefined;
+  for (const [name, url] of [['ODATANO_ACCESS_URL', baseUrl], ['ODATANO_ANALYTICS_URL', analyticsUrl]] as const) {
+    let host: URL;
+    try { host = new URL(url); } catch { throw new Error(`Invalid ${name}: ${url}`); }
+    if (host.protocol === 'http:' && (token || username) && !loopback(host.hostname) && env.NIGHTGATE_ALLOW_PLAIN_HTTP !== '1') {
+      throw new Error(`${name} ${url} is plain http: the key or password would travel unencrypted. Use https, or set NIGHTGATE_ALLOW_PLAIN_HTTP=1 for a network you trust`);
+    }
+  }
+  const callPackages = (env.NIGHTGATE_CALL_PACKAGES ?? '').split(',').map((p) => p.trim()).filter(Boolean);
   const servicePath = env.NIGHTGATE_SERVICE_PATH ?? '/odata/v4/midnight';
   const direct = !!username || !!token?.startsWith('ngat_');
   return {
@@ -97,6 +113,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): NightgateMcpCo
     proofServerUrl: env.NIGHTGATE_PROOF_SERVER_URL || undefined,
     swapStateFile: env.NIGHTGATE_SWAP_STATE_FILE || undefined,
     swapMaxInputs,
+    ...(callPackages.length ? { callPackages } : {}),
   };
 }
 
@@ -113,17 +130,35 @@ export function apiConnectOptions(config: NightgateMcpConfig): Record<string, un
   };
 }
 
-/** Where a local builder reads contract state: the configured indexer and node, else the NIGHTGATE API. */
-export function builderChainOptions(config: NightgateMcpConfig): Record<string, unknown> {
-  if (config.indexerHttpUrl && config.indexerWsUrl) {
-    return {
-      indexerHttpUrl: config.indexerHttpUrl,
-      indexerWsUrl: config.indexerWsUrl,
-      nodeUrl: config.nodeUrl ?? `wss://rpc.${config.network}.midnight.network/`,
-      walletSync: false,
-    };
+/** True when the process wallet has an indexer to sync from: a configured one, or the gateway's lane for a gateway key. */
+export function canSyncWallet(config: NightgateMcpConfig): boolean {
+  return Boolean(config.indexerHttpUrl && config.indexerWsUrl) || isGatewayKey(config);
+}
+
+/** The indexer the process wallet syncs from: the configured one, else the gateway's indexer lane; null when there is none. */
+export async function walletIndexer(config: NightgateMcpConfig): Promise<{ indexerHttpUrl: string; indexerWsUrl: string } | null> {
+  if (config.indexerHttpUrl && config.indexerWsUrl) return { indexerHttpUrl: config.indexerHttpUrl, indexerWsUrl: config.indexerWsUrl };
+  if (!isGatewayKey(config)) return null;
+  const gatewayIndexerUrls = await txExport<(api: Record<string, unknown>) => { indexerHttpUrl: string; indexerWsUrl: string } | null>('gatewayIndexerUrls', 'the wallet sync through the gateway', '0.20.0');
+  return gatewayIndexerUrls({ baseUrl: config.baseUrl, token: config.token });
+}
+
+/** What a wallet sync needs that this server does not have. */
+export const NO_INDEXER = 'the wallet has no indexer to sync its coins from: use a gateway key (oda_…), or set NIGHTGATE_INDEXER_HTTP_URL and NIGHTGATE_INDEXER_WS_URL for a direct instance';
+
+/**
+ * Where a local builder reads contract state: the configured indexer and node, else the NIGHTGATE API.
+ * With `sync` the builder also syncs its own NIGHT coins from that indexer.
+ */
+export function builderChainOptions(
+  config: NightgateMcpConfig,
+  sync?: { walletSync: 'coins'; indexer: { indexerHttpUrl: string; indexerWsUrl: string } },
+): Record<string, unknown> {
+  const walletSync = sync?.walletSync ?? false;
+  if (config.indexerHttpUrl && config.indexerWsUrl && config.nodeUrl) {
+    return { indexerHttpUrl: config.indexerHttpUrl, indexerWsUrl: config.indexerWsUrl, nodeUrl: config.nodeUrl, walletSync };
   }
-  return { api: apiConnectOptions(config), walletSync: false };
+  return { api: apiConnectOptions(config), walletSync, ...(sync ? sync.indexer : {}) };
 }
 
 /** The shared sandbox vaults of the hosted gateway, one per testnet (attestation-vault-32). */

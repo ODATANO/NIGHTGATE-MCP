@@ -17,7 +17,8 @@ Anchors documents, proves zero-knowledge claims over hidden fields, grants
 disclosure, and verifies records and claims against live contract state;
 swaps shielded tokens over an offer board and mints them on a token factory.
 Transactions are sponsored, the agent holds no NIGHT. The chain is read through the
-[ODATANO API](https://api.odatano.dev): no indexer, no node.
+[ODATANO API](https://api.odatano.dev), and the wallet syncs its coins through
+the gateway's indexer lane: no indexer, no node.
 
 ## Quick start
 
@@ -58,15 +59,16 @@ Errors carry the server's HTTP status and `code`.
 ## Configuration
 
 [docs/configuration.md](docs/configuration.md): every variable, an own
-NIGHTGATE instance, version requirements. Needs NIGHTGATE >= 0.36.0; from 0.37.0,
-which the hosted gateway runs, the server holds each status read until the job
-settles; from 0.38.0 `list_swap_offers` and `my_swap_offers` wait with `waitMs`;
-from 0.39.0 `send_token`, `burn_token`, directed offers and receipts.
+NIGHTGATE instance, version requirements. Needs NIGHTGATE >= 0.36.0; from 0.37.0
+the server holds each status read until the job settles; from 0.38.0
+`list_swap_offers` and `my_swap_offers` wait with `waitMs`; from 0.39.0
+`send_token`, `burn_token`, directed offers and receipts; from 0.40.0 sponsored
+payouts from a contract. `get_board_status` names the version a server runs.
 
 ## Development
 
 ```bash
-npm install && npm run integration
+npm install && npm run test:unit && npm run integration
 ```
 
 Live lanes:
