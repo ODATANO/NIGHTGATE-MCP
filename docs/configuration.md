@@ -16,6 +16,7 @@ NIGHTGATE instance, and which versions it needs.
 | `NIGHTGATE_INDEXER_HTTP_URL` / `_WS_URL` | unset | A Midnight indexer of your own; the wallet syncs from it. With `NIGHTGATE_NODE_URL` as well the builders read the chain from both instead of the API. A gateway key needs none: the wallet syncs through the gateway's indexer lane (`/indexer/api/v4/graphql`, 1 unit per query, 5 per WebSocket session) |
 | `NIGHTGATE_NODE_URL` | unset | A Midnight node of your own, for builders that read your indexer. There is no default: Midnight retired its hosted preprod and mainnet hosts |
 | `NIGHTGATE_PROOF_SERVER_URL` | unset | Prove on a proof server instead of in-process |
+| `NIGHTGATE_SANDBOX_VAULT` | the network's sandbox vault | `attestation-vault-32` a call without `contractAddress` targets, 64 hex. Mainnet has no default |
 | `NIGHTGATE_SWAP_STATE_FILE` | unset | File for the wallet's state; it holds the wallet's coins, keep it like a key. Next to it: `<file>.halves.json` (halves and `$coin` calls built here, so a restart can still revert them), `<file>.unshielded` (the NIGHT coins of `call_contract`), `<file>.private.json` (private states of package witnesses), `<file>.lock` (one MCP server per file) |
 | `NIGHTGATE_CALL_PACKAGES` | unset | Comma list of the lineage packages `call_contract` may load; unset = every installed one. A package runs its own code here, so list them on a shared machine |
 | `NIGHTGATE_SWAP_MAX_INPUTS` | `4` | Most coins one swap half spends; the sponsor's limit applies |
@@ -44,15 +45,14 @@ sponsored call.
 
 ## Compatibility
 
-NIGHTGATE >= 0.36.0; from 0.37.0 the server holds each status read until the
-job settles; an older server is asked every few seconds. From 0.38.0
-`list_swap_offers` and `my_swap_offers` take `waitMs`; an older server gets no
-`waitMs` sent and answers at once. From 0.39.0 `send_token`, directed offers,
-`burn_token` and receipts; `call_contract` needs the lineage package next to the
-server, a `$night` pay-in needs `allowUnshieldedOffers` on the grant, a sponsored
-payout from a contract NIGHTGATE 0.40.0. `get_board_status` names the version a
-server runs (NIGHTGATE 0.40.0). `@odatano/nightgate-tx`
-comes with the package; minting also needs `@odatano/contract-token-factory`
+NIGHTGATE >= 0.42.3 on a ledger 9 network; a network before its fork stays on
+MCP 0.21.0. `call_contract` needs the lineage package next to the server, a
+`$night` pay-in needs `allowUnshieldedOffers` on the grant.
+`build_sponsorable_transaction` builds on contracts deployed after ledger 9. A
+contract deployed before keeps its ledger 8 verifier keys; `call_contract` builds
+on it with the package version compiled for ledger 8, installed under its own
+name (npm tag `ledger8`). `get_board_status` names the version a server runs.
+`@odatano/nightgate-tx` comes with the package; minting also needs `@odatano/contract-token-factory`
 next to it. The free state reads need `NIGHTGATE_PUBLIC_VERIFY=true` on an own
 instance that is reached without credentials. What an older server lacks per version:
 [CHANGELOG](CHANGELOG.md).

@@ -1,14 +1,14 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://cdn.jsdelivr.net/npm/@odatano/brand@1/logos/nightgate-mcp-logo.svg">
-    <img src="https://cdn.jsdelivr.net/npm/@odatano/brand@1/logos/nightgate-mcp-logo-on-light.svg" alt="NIGHTGATE MCP" height="84">
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/nightgate-mcp-logo-on-dark.svg">
+    <img src="docs/assets/nightgate-mcp-logo.svg" alt="NIGHTGATE MCP" height="110">
   </picture>
 </p>
 
 # @odatano/nightgate-mcp
 
 [![npm](https://img.shields.io/npm/v/@odatano/nightgate-mcp)](https://www.npmjs.com/package/@odatano/nightgate-mcp)
-[![NIGHTGATE](https://img.shields.io/badge/NIGHTGATE-%3E%3D%200.36.0-4b0082)](https://www.npmjs.com/package/@odatano/nightgate)
+[![NIGHTGATE](https://img.shields.io/badge/NIGHTGATE-%3E%3D%200.42.3-4b0082)](https://www.npmjs.com/package/@odatano/nightgate)
 [![MCP](https://img.shields.io/badge/MCP-server-2ea44f)](https://modelcontextprotocol.io/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-yellow)](LICENSE)
 
@@ -59,11 +59,11 @@ Errors carry the server's HTTP status and `code`.
 ## Configuration
 
 [docs/configuration.md](docs/configuration.md): every variable, an own
-NIGHTGATE instance, version requirements. Needs NIGHTGATE >= 0.36.0; from 0.37.0
-the server holds each status read until the job settles; from 0.38.0
-`list_swap_offers` and `my_swap_offers` wait with `waitMs`; from 0.39.0
-`send_token`, `burn_token`, directed offers and receipts; from 0.40.0 sponsored
-payouts from a contract. `get_board_status` names the version a server runs.
+NIGHTGATE instance, version requirements. Needs NIGHTGATE >= 0.42.3 on a ledger 9
+network; a network before its fork stays on MCP 0.21.0. `build_sponsorable_transaction`
+builds on contracts deployed after ledger 9. A contract deployed before keeps its ledger 8
+verifier keys; `call_contract` builds on it with the package version compiled for ledger 8,
+installed under its own name (npm tag `ledger8`). `get_board_status` names the version a server runs.
 
 ## Development
 

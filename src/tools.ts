@@ -113,7 +113,7 @@ function checkFor(input: Omit<BuildInput, 'bind'>, ownAttesterId: string): JobCh
 }
 
 const CONTRACT = z.string().regex(HEX64, 'contractAddress must be 64 hex characters').optional()
-  .describe('AttestationVault address (64 hex); default the shared sandbox vault of the network (preprod, preview)');
+  .describe('AttestationVault address (64 hex); default NIGHTGATE_SANDBOX_VAULT, else the shared sandbox vault of the network (preprod, preview)');
 
 /** Every NIGHTGATE tool. Writes are built here with the caller seed and paid by a sponsor; no tool needs a server wallet. */
 export function registerTools(server: McpServer, client: NightgateClient, config?: NightgateMcpConfig): void {

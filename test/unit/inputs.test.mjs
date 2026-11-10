@@ -5,7 +5,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { coerceArgs, witnessesAt } from '../../dist/contract-call.js';
-import { builderChainOptions, loadConfig } from '../../dist/config.js';
+import { builderChainOptions, loadConfig, SANDBOX_VAULTS, vaultOf } from '../../dist/config.js';
 import { odataLiteral } from '../../dist/client.js';
 import { redact } from '../../dist/tools.js';
 
@@ -43,6 +43,16 @@ test('credentials never go to a plain http host off this machine', () => {
 test('NIGHTGATE_CALL_PACKAGES is a comma list, unset by default', () => {
   assert.equal(loadConfig({}).callPackages, undefined);
   assert.deepEqual(loadConfig({ NIGHTGATE_CALL_PACKAGES: ' @a/contract-x, b ' }).callPackages, ['@a/contract-x', 'b']);
+});
+
+test('NIGHTGATE_SANDBOX_VAULT replaces the default vault of the network', () => {
+  assert.equal(vaultOf(loadConfig({})), SANDBOX_VAULTS.preprod);
+  const own = 'ab'.repeat(32);
+  assert.equal(vaultOf(loadConfig({ NIGHTGATE_SANDBOX_VAULT: own.toUpperCase() })), own);
+  assert.equal(vaultOf(loadConfig({ NIGHTGATE_NETWORK: 'mainnet', NIGHTGATE_SANDBOX_VAULT: own })), own);
+  assert.equal(vaultOf(loadConfig({ NIGHTGATE_SANDBOX_VAULT: own }), 'cd'.repeat(32)), 'cd'.repeat(32));
+  assert.throws(() => vaultOf(loadConfig({ NIGHTGATE_NETWORK: 'mainnet' })), /NIGHTGATE_SANDBOX_VAULT/);
+  assert.throws(() => loadConfig({ NIGHTGATE_SANDBOX_VAULT: 'xyz' }), /Invalid NIGHTGATE_SANDBOX_VAULT/);
 });
 
 test('a builder never falls back to a retired node host', () => {

@@ -44,6 +44,8 @@ export interface NightgateMcpConfig {
   zkCacheDir?: string;
   /** Set to prove contract circuits on a proof server instead of in-process wasm. */
   proofServerUrl?: string;
+  /** 64 hex; optional, default the network's entry in SANDBOX_VAULTS; the attestation-vault-32 a call without contractAddress targets. */
+  sandboxVault?: string;
 
   // ---- shielded swaps, all optional ----
   /** File the swap wallet's state is kept in, so a restart resumes instead of syncing from genesis. It holds the wallet's coins. */
@@ -90,6 +92,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): NightgateMcpCo
     }
   }
   const callPackages = (env.NIGHTGATE_CALL_PACKAGES ?? '').split(',').map((p) => p.trim()).filter(Boolean);
+  const sandboxVault = env.NIGHTGATE_SANDBOX_VAULT?.trim().toLowerCase() || undefined;
+  if (sandboxVault && !/^[0-9a-f]{64}$/.test(sandboxVault)) {
+    throw new Error(`Invalid NIGHTGATE_SANDBOX_VAULT: ${env.NIGHTGATE_SANDBOX_VAULT} (a contract address, 64 hex)`);
+  }
   const servicePath = env.NIGHTGATE_SERVICE_PATH ?? '/odata/v4/midnight';
   const direct = !!username || !!token?.startsWith('ngat_');
   return {
@@ -111,6 +117,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): NightgateMcpCo
     zkConfigBaseUrl: env.NIGHTGATE_ZK_CONFIG_BASE_URL || undefined,
     zkCacheDir: env.NIGHTGATE_ZK_CACHE_DIR || undefined,
     proofServerUrl: env.NIGHTGATE_PROOF_SERVER_URL || undefined,
+    sandboxVault,
     swapStateFile: env.NIGHTGATE_SWAP_STATE_FILE || undefined,
     swapMaxInputs,
     ...(callPackages.length ? { callPackages } : {}),
@@ -163,18 +170,18 @@ export function builderChainOptions(
 
 /** The shared sandbox vaults of the hosted gateway, one per testnet (attestation-vault-32). */
 export const SANDBOX_VAULTS: Readonly<Record<string, string>> = {
-  preprod: 'ca0b1e3c601857a7b6940bbbbd6508654f5983b63aa36ccf8254f7700f89aead',
-  preview: '31df87bc396ab32e8408b0ebfd1f8e7bf121f17e12e2ba360ed9f08c7ba40692',
+  preprod: 'b80d20eaa1f142de298edab1e39d222f425c65f62fd937f941ba9ed619212379',
+  preview: 'c510433fae560ada7f22872238e0f45b851618bcc7f7cea43d1ee024f476fba2',
 };
 
-/** The vault a call targets: the given address, else the sandbox vault of the network. */
+/** The vault a call targets: the given address, else NIGHTGATE_SANDBOX_VAULT, else the sandbox vault of the network. */
 export function vaultOf(config: NightgateMcpConfig, contractAddress?: string, compiledArtifactRef?: string): string {
   if (contractAddress) return contractAddress.toLowerCase();
   if (compiledArtifactRef && compiledArtifactRef !== 'attestation-vault-32') {
     throw new Error(`the sandbox vaults are attestation-vault-32: pass contractAddress for a '${compiledArtifactRef}' vault`);
   }
-  const sandbox = SANDBOX_VAULTS[config.network];
-  if (!sandbox) throw new Error(`contractAddress is required on ${config.network}: there is no sandbox vault there`);
+  const sandbox = config.sandboxVault ?? SANDBOX_VAULTS[config.network];
+  if (!sandbox) throw new Error(`contractAddress is required on ${config.network}: there is no sandbox vault there (or set NIGHTGATE_SANDBOX_VAULT)`);
   return sandbox;
 }
 

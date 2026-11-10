@@ -105,10 +105,11 @@ are `attestation-vault-32` and open to every key; a 16-slot
 
 | Network | Vault |
 |---|---|
-| preprod | `ca0b1e3c601857a7b6940bbbbd6508654f5983b63aa36ccf8254f7700f89aead` |
-| preview | `31df87bc396ab32e8408b0ebfd1f8e7bf121f17e12e2ba360ed9f08c7ba40692` |
+| preprod | `b80d20eaa1f142de298edab1e39d222f425c65f62fd937f941ba9ed619212379` |
+| preview | `c510433fae560ada7f22872238e0f45b851618bcc7f7cea43d1ee024f476fba2` |
 
-Mainnet has no sandbox vault; pass `contractAddress` there.
+`NIGHTGATE_SANDBOX_VAULT` replaces the default of the network. Mainnet has no
+sandbox vault; pass `contractAddress` or set `NIGHTGATE_SANDBOX_VAULT` there.
 
 ## Seed
 

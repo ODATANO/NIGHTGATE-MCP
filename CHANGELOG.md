@@ -7,6 +7,31 @@ The README says which NIGHTGATE the current version needs.
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-11-09
+
+Needs NIGHTGATE 0.42.3 on a ledger 9 network. A network before its fork stays on
+0.21.0.
+
+### Added
+
+- `NIGHTGATE_SANDBOX_VAULT`: the `attestation-vault-32` a call without
+  `contractAddress` targets, in place of the network's default.
+
+### Changed
+
+- New sandbox vaults on ledger 9: preprod
+  `b80d20eaa1f142de298edab1e39d222f425c65f62fd937f941ba9ed619212379`, preview
+  `c510433fae560ada7f22872238e0f45b851618bcc7f7cea43d1ee024f476fba2`.
+
+- `@odatano/nightgate-tx` 0.21.1. Local building reads and writes ledger 9
+  transactions and contract states. Before,
+  `build_sponsorable_transaction` failed on ledger 9 with
+  `expected header tag 'midnight:contract-state[v6]:'`.
+- `build_sponsorable_transaction` builds on contracts deployed after ledger 9.
+  A contract deployed before keeps its ledger 8 verifier keys; `call_contract`
+  builds on it with the package version compiled for ledger 8, installed under
+  its own name (npm tag `ledger8`).
+
 ## [0.21.0] - 2026-10-31
 
 Needs NIGHTGATE 0.36.0; `send_token`, directed offers and receipts need 0.39.0,
