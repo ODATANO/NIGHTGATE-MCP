@@ -8,7 +8,7 @@
 # @odatano/nightgate-mcp
 
 [![npm](https://img.shields.io/npm/v/@odatano/nightgate-mcp)](https://www.npmjs.com/package/@odatano/nightgate-mcp)
-[![NIGHTGATE](https://img.shields.io/badge/NIGHTGATE-%3E%3D%200.42.3-4b0082)](https://www.npmjs.com/package/@odatano/nightgate)
+[![NIGHTGATE](https://img.shields.io/badge/NIGHTGATE-%3E%3D%200.43.1-4b0082)](https://www.npmjs.com/package/@odatano/nightgate)
 [![MCP](https://img.shields.io/badge/MCP-server-2ea44f)](https://modelcontextprotocol.io/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-yellow)](LICENSE)
 
@@ -59,7 +59,7 @@ Errors carry the server's HTTP status and `code`.
 ## Configuration
 
 [docs/configuration.md](docs/configuration.md): every variable, an own
-NIGHTGATE instance, version requirements. Needs NIGHTGATE >= 0.42.3 on a ledger 9
+NIGHTGATE instance, version requirements. Needs NIGHTGATE >= 0.43.1 on a ledger 9
 network; a network before its fork stays on MCP 0.21.0. `build_sponsorable_transaction`
 builds on contracts deployed after ledger 9. A contract deployed before keeps its ledger 8
 verifier keys; `call_contract` builds on it with the package version compiled for ledger 8,

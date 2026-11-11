@@ -292,13 +292,14 @@ export async function seedIdentity(config: NightgateMcpConfig): Promise<SeedIden
 
 /** The caller's attester id (derived from the seed), without building anything. */
 export async function attesterIdentity(config: NightgateMcpConfig): Promise<{
-  attesterId: string; network: string; shieldedAddress?: string; coinPublicKey?: string; encryptionPublicKey?: string;
+  attesterId: string; network: string; shieldedAddress?: string; nightAddress?: string; coinPublicKey?: string; encryptionPublicKey?: string;
 }> {
   const b = await getBuilder(config);
   return {
     attesterId: String(b.attesterId),
     network: config.network,
     ...(b.addresses?.shielded ? { shieldedAddress: String(b.addresses.shielded) } : {}),
+    ...(b.addresses?.night ? { nightAddress: String(b.addresses.night) } : {}),
     ...(b.shieldedKeys ? { coinPublicKey: String(b.shieldedKeys.coinPublicKey), encryptionPublicKey: String(b.shieldedKeys.encryptionPublicKey) } : {}),
   };
 }

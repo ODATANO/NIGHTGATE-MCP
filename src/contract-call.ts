@@ -127,8 +127,8 @@ async function getPackageBuilder(config: NightgateMcpConfig, packageName: string
 
 /** How long a call that never reached the sponsor holds its gate; one with a job holds it until the job settled. */
 const GATE_TTL_MS = 3_600_000;
-/** A call that holds a gate until its job settled. */
-interface Holder { key: string; packageName: string; since: number; txB64?: string; jobId?: string }
+/** A call that holds a gate until its job settled. Its NIGHT comes back through its package's builder, or through `release`. */
+interface Holder { key: string; packageName?: string; since: number; txB64?: string; jobId?: string; release?: (txB64: string) => Promise<void> }
 /**
  * One unsettled call per gate: `night` for a NIGHT pay-in, since two could pick the same coins, and
  * `state|<package>|<contract>` for a call whose witnesses may change a private state, since two would build on the same one.
@@ -136,14 +136,14 @@ interface Holder { key: string; packageName: string; since: number; txB64?: stri
 const gates = new Map<string, Holder>();
 
 /** Takes a gate for this call, synchronously, so two calls that arrive together never both pass. */
-function takeGate(gate: string, callKey: string, packageName: string, what: string): Holder {
+function takeGate(gate: string, callKey: string, what: string, owner: Pick<Holder, 'packageName' | 'release'>): Holder {
   const held = gates.get(gate);
   if (held && held.key !== callKey && (held.jobId || Date.now() - held.since < GATE_TTL_MS)) {
     throw new Error(`${what} of this server has not settled yet (${held.jobId ? `job ${held.jobId}` : 'not handed over'}, built ${new Date(held.since).toISOString()}); ` +
       'run that call again to wait for it, or get_swap_wallet, then call again');
   }
   if (held && held.key !== callKey && gate === 'night') void releaseNight(held).catch(() => { /* the builder is gone already */ });
-  const mine: Holder = { key: callKey, packageName, since: Date.now() };
+  const mine: Holder = { key: callKey, ...owner, since: Date.now() };
   gates.set(gate, mine);
   return mine;
 }
@@ -153,15 +153,33 @@ function dropGate(gate: string, mine: Holder | undefined): void {
   if (mine && gates.get(gate) === mine) gates.delete(gate);
 }
 
-/** Releases the NIGHT a pay-in reserved in its package's builder. */
+/** Releases the NIGHT a pay-in or payment reserved. */
 async function releaseNight(call: Holder): Promise<void> {
   if (!call.txB64) return;
+  if (call.release) { await call.release(call.txB64); return; }
   const id = `${call.packageName}|coins`;
   const entry = builders.get(id);
   if (!entry) return;
   const { builder } = await entry;
   if (typeof builder.revert === 'function') await builder.revert(call.txB64);
   else await dropBuilder(id);
+}
+
+/** The NIGHT gate of a payment built outside a package builder. */
+export interface NightHold {
+  /** Names the built transaction, so its job and a later release find the gate. */
+  built(txB64: string): void;
+  /** Frees the gate. False when another call took it over meanwhile. */
+  drop(): boolean;
+}
+
+/** Takes the NIGHT gate for a payment; `release` gives its coins back when another call takes the gate over. */
+export function holdNight(callKey: string, what: string, release: (txB64: string) => Promise<void>): NightHold {
+  const mine = takeGate('night', callKey, what, { release });
+  return {
+    built: (txB64) => { mine.txB64 = txB64; },
+    drop: () => { if (gates.get('night') !== mine) return false; gates.delete('night'); return true; },
+  };
 }
 
 /** Records the job a gated call went into; from then on only the job's outcome frees the gate. */
@@ -347,7 +365,7 @@ export async function buildContractCall(config: NightgateMcpConfig, input: Contr
   if (coins.length && !withIndexer) throw new Error(`a $coin argument needs the shielded coins of this wallet, and ${NO_INDEXER}`);
   if (unshielded && !withIndexer) throw new Error(`a call that pays unshielded tokens needs this wallet's NIGHT coins, and ${NO_INDEXER}`);
   const contractAddress = input.contractAddress.toLowerCase();
-  const nightGate = unshielded ? takeGate('night', callKey, input.package, 'a NIGHT pay-in') : undefined;
+  const nightGate = unshielded ? takeGate('night', callKey, 'a NIGHT pay-in', { packageName: input.package }) : undefined;
   const stateGate = `state|${input.package}|${contractAddress}`;
   let stateHold: Holder | undefined;
   try {
@@ -370,7 +388,7 @@ export async function buildContractCall(config: NightgateMcpConfig, input: Contr
     const entry = await getPackageBuilder(config, input.package, wallet?.shieldedWallet, mode);
     const b = mode === 'coins' ? await syncedBuilder(entry, t0) : entry.builder;
     const own = await packageWitnesses(config, input.package, contractAddress);
-    if (own) stateHold = takeGate(stateGate, callKey, input.package, `a call on ${contractAddress.slice(0, 16)}… that may change its private state`);
+    if (own) stateHold = takeGate(stateGate, callKey, `a call on ${contractAddress.slice(0, 16)}… that may change its private state`, { packageName: input.package });
     const stateKey = `${input.package}|${contractAddress}`;
     const initialPrivateState = own ? (await savedPrivateState(config, stateKey)) ?? own.privateState : undefined;
     let privateState = initialPrivateState;

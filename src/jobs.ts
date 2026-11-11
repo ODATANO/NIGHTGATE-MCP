@@ -92,6 +92,11 @@ export function jobSession(jobId: string): string | undefined {
   return sessions.get(jobId);
 }
 
+/** Makes a job of an earlier process readable again. */
+export function rememberJob(jobId: string, sessionId: string): void {
+  sessions.set(jobId, sessionId);
+}
+
 const started = new Map<string, { job: Promise<Record<string, unknown>>; at: number }>();
 
 /** A job started by `startOnce`, and whether an earlier identical call started it. */
@@ -125,10 +130,11 @@ export function forgetStart(key: string): void {
   if (started.delete(key)) attempts.set(key, (attempts.get(key) ?? 0) + 1);
 }
 
-/** The server key of a call: the caller's for the first attempt, then one per rebuild, so the server never sees one key with two payloads. */
+/** The server key of a call: the caller's key and the call it names, then one per rebuild. So one key never stands for two calls. */
 function serverKey(key: string, callerKey: string): string {
   const n = attempts.get(key) ?? 0;
-  return n ? `${callerKey}:retry-${n}` : callerKey;
+  const named = `${callerKey}:${key.slice(0, 12)}`;
+  return n ? `${named}:retry-${n}` : named;
 }
 
 /** What a write tool hands to a sponsor action, built once. */
@@ -141,6 +147,8 @@ export interface Handover {
   detail?: Record<string, unknown>;
   /** Releases what the build reserved; runs when the sponsor refuses the transaction. */
   onRefused?: () => Promise<void>;
+  /** Releases what the build reserved when an earlier job already holds the key; default `onRefused`. */
+  discard?: () => Promise<void>;
   /** Runs once the sponsor took the transaction, with the job it started. */
   onSent?: (job: Record<string, unknown>) => void;
 }
@@ -157,6 +165,12 @@ function unanswered(err: unknown): boolean {
   if (err instanceof NightgateApiError) return err.status === 502 || err.status === 504;
   const name = (err as Error)?.name;
   return name === 'TimeoutError' || name === 'AbortError' || /fetch failed|ECONNRESET|socket hang up/i.test(String((err as Error)?.message ?? err));
+}
+
+/** The job a key conflict names: the one an earlier build of this call started. */
+function heldJob(err: NightgateApiError): Record<string, unknown> | undefined {
+  const job = err.detail?.job;
+  return isRecord(job) && typeof job.jobId === 'string' ? job : undefined;
 }
 
 /**
@@ -184,11 +198,23 @@ export function startSponsored(
         return { ...job, ...(handover.info ?? {}), idempotencyKey };
       } catch (err) {
         if (unanswered(err) && attempt < SEND_ATTEMPTS) continue;
-        // The caller's key already names an earlier, different build (one from before a restart): this rebuild takes the next one.
-        if (callerKey && !kept && err instanceof NightgateApiError && err.code === 'IDEMPOTENCY_KEY_CONFLICT' && conflicts < MAX_KEY_CONFLICTS) {
+        const conflict = callerKey && !kept && err instanceof NightgateApiError && err.code === 'IDEMPOTENCY_KEY_CONFLICT' ? err : undefined;
+        // An earlier build of this call holds the key, usually one from before a restart. While it runs or once it landed, it is the answer.
+        const held = conflict && heldJob(conflict);
+        if (held && chainOutcome(held) !== 'failed') {
+          unsent.delete(key);
+          await (handover.discard ?? handover.onRefused)?.().catch((e) => console.error(`nightgate-mcp: reserved coins not released: ${(e as Error).message}`));
+          return {
+            ...(handover.info ?? {}), jobId: held.jobId, status: held.status, idempotencyKey, deduplicated: true,
+            dedupe: `This call's idempotencyKey already names job ${String(held.jobId)}, started by an earlier call. Nothing new was sent, and what this call built was discarded. ` +
+              'For a second, separate call pass a new idempotencyKey.',
+          };
+        }
+        // That build failed on chain, or the server does not say which job it is: this rebuild takes the next key.
+        if (conflict && conflicts < MAX_KEY_CONFLICTS) {
           conflicts++;
           attempts.set(key, (attempts.get(key) ?? 0) + 1);
-          idempotencyKey = serverKey(key, callerKey);
+          idempotencyKey = serverKey(key, callerKey as string);
           handover.body = { ...handover.body, idempotencyKey };
           attempt = 0;
           continue;
@@ -227,8 +253,8 @@ function nextStep(job: Record<string, unknown>): string | undefined {
   return 'Nothing was applied. Read errorCode and errorMessage, fix the input and run the tool again.';
 }
 
-/** Reads the job's status once, waiting on the server where it can. */
-async function readJob(client: NightgateClient, config: NightgateMcpConfig | undefined, jobId: string, sessionId: string): Promise<Record<string, unknown>> {
+/** Reads the job's status once, waiting on the server where it can. The session is sent when known; a current server needs none. */
+async function readJob(client: NightgateClient, config: NightgateMcpConfig | undefined, jobId: string, sessionId: string | undefined): Promise<Record<string, unknown>> {
   const waitMs = longPoll ? Math.min(JOB_WAIT_MS, Math.max(0, (config?.timeoutMs ?? 30_000) - 5_000)) : 0;
   try {
     return await client.callAction('getJobStatus', waitMs > 0 ? { jobId, sessionId, waitMs } : { jobId, sessionId }) as Record<string, unknown>;
@@ -249,9 +275,10 @@ export async function awaitJob(
   extra: ToolExtra | undefined,
   check?: JobCheck,
 ): Promise<Record<string, unknown>> {
-  const { jobId, sessionId } = start;
-  if (typeof jobId !== 'string' || typeof sessionId !== 'string') return start;
-  sessions.set(jobId, sessionId);
+  const { jobId } = start;
+  if (typeof jobId !== 'string') return start;
+  const sessionId = typeof start.sessionId === 'string' ? start.sessionId : undefined;
+  if (sessionId) sessions.set(jobId, sessionId);
   const deadline = Date.now() + JOB_MAX_WAIT_MS;
   let job: Record<string, unknown> = start;
   let statusError: string | undefined;

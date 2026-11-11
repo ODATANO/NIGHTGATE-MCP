@@ -7,7 +7,55 @@ The README says which NIGHTGATE the current version needs.
 
 ## [Unreleased]
 
-## [0.22.0] - 2026-11-09
+## [0.23.0] - 2026-11-11
+
+Needs NIGHTGATE 0.43.1.
+
+### Added
+
+- `send_token` pays an unshielded address (`mn_addr_...`): NIGHT, or the
+  unshielded `tokenType` given. The transfer is built and signed here from the
+  wallet's unshielded coins, the sponsor pays the fee. `tokenType` is optional
+  for such an address and stays required for a shielded one. One payment or
+  NIGHT pay-in runs at a time; a failed one gives its coins back.
+- `get_attester_identity` returns `nightAddress`, the unshielded address a
+  sender pays NIGHT to.
+- `get_swap_wallet` lists the unshielded coins under `unshielded`: the address,
+  and per token type, NIGHT first, `balance`, `coins` and `reserved`. A sync
+  that failed is reported there and leaves the shielded part intact.
+
+### Changed
+
+- `@odatano/nightgate-tx` 0.22.1. It brings the wallet for unshielded coins,
+  and `gasHeadroom` of a local build is lowered to what the ledger's time to
+  dismiss allows.
+- A wallet counts as synced once it reads the chain at ledger 9, so the first
+  payment or swap after a start builds for the right ledger.
+- A wallet does not start against an indexer that does not answer. The tool
+  fails with the host and the reason the indexer gave, for example `HTTP 410`,
+  in place of a sync that never ends. `get_swap_wallet` reports it for the
+  unshielded coins under `unshielded.error`.
+- **A call repeated with its `idempotencyKey` after a restart pays once.** The
+  call is built again and the server answers which job holds the key. While that job runs or once it landed the tool returns it with
+  `deduplicated: true`, sends nothing and releases what it built. A job the
+  chain refused is replaced under `<key>:retry-<n>`. Before, the rebuilt call
+  went out under `<key>:retry-1` whatever the first job had done.
+- The key the server gets is the caller's with a suffix that names the call
+  (`<key>:<12 hex>`), so one key on two different calls stays two calls.
+- A job is read by its id alone. A half restored after a restart keeps the job
+  it went into: the next `get_swap_wallet` settles it, a landed one leaves the
+  list.
+- Tool descriptions: the two hand-over tools say that the server picks the
+  wallet that pays, `prepare_document_proof` and `verify_predicate` name the
+  32 slots of the default lineage, `derive_token_type` points at `send_token`.
+  Notes on server versions below the required one are gone.
+
+### Fixed
+
+- `sponsor_finalized_transaction` no longer announces a receipt. Only a swap
+  or a transfer carries one.
+
+## [0.22.0] - 2026-11-10
 
 Needs NIGHTGATE 0.42.3 on a ledger 9 network. A network before its fork stays on
 0.21.0.
@@ -22,7 +70,6 @@ Needs NIGHTGATE 0.42.3 on a ledger 9 network. A network before its fork stays on
 - New sandbox vaults on ledger 9: preprod
   `b80d20eaa1f142de298edab1e39d222f425c65f62fd937f941ba9ed619212379`, preview
   `c510433fae560ada7f22872238e0f45b851618bcc7f7cea43d1ee024f476fba2`.
-
 - `@odatano/nightgate-tx` 0.21.1. Local building reads and writes ledger 9
   transactions and contract states. Before,
   `build_sponsorable_transaction` failed on ledger 9 with
@@ -31,6 +78,7 @@ Needs NIGHTGATE 0.42.3 on a ledger 9 network. A network before its fork stays on
   A contract deployed before keeps its ledger 8 verifier keys; `call_contract`
   builds on it with the package version compiled for ledger 8, installed under
   its own name (npm tag `ledger8`).
+- README logo: the ODATANO icon with NIGHTGATE MCP, in `docs/assets`.
 
 ## [0.21.0] - 2026-10-31
 

@@ -11,6 +11,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { buildServer } from '../dist/server.js';
 import { loadConfig } from '../dist/config.js';
 import { __setSwapModuleForTests, closeSwapWallet } from '../dist/swap.js';
+import { __setUnshieldedWalletForTests } from '../dist/unshielded.js';
 
 function fail(message) {
   console.error(`FAIL: ${message}`);
@@ -67,6 +68,17 @@ __setSwapModuleForTests({
   },
   readSwapTerms: (tx) => tx.terms,
 });
+
+const NIGHT = '0'.repeat(64);
+const nightWallet = {
+  address: 'mn_addr_test1night', nightTokenType: NIGHT,
+  sync: async () => {},
+  balances: async () => ({ [NIGHT]: 5000000n }),
+  coins: async () => [{ tokenType: NIGHT, amount: 5000000n }],
+  pending: async () => [],
+  close: async () => {},
+};
+__setUnshieldedWalletForTests(async () => nightWallet);
 
 // The transport: one refusal, then jobs.
 let refuseNext = true;
@@ -129,7 +141,9 @@ try {
     fail(`createSwapWallet input: ${JSON.stringify({ ...opened, seedHex: '…' })}`);
   }
   if ((await readFile(stateFile, 'utf8')) !== 'state-after-0-halves') fail('the wallet state was not written after the sync');
-  console.log('OK: get_swap_wallet lists balance, coins and spendable per token type, state saved after the sync');
+  const wantNight = { address: nightWallet.address, synced: true, tokens: [{ tokenType: NIGHT, name: 'NIGHT', balance: '5000000', coins: 1, reserved: '0' }] };
+  if (!same(w.value.unshielded, wantNight)) fail(`get_swap_wallet unshielded: ${JSON.stringify(w.value.unshielded)}`);
+  console.log('OK: get_swap_wallet lists balance, coins and spendable per token type and the NIGHT of the wallet, state saved after the sync');
 
   // An offer of this wallet.
   const built = await mcp.call('build_swap_offer', { give: { tokenType: A.toUpperCase(), amount: '1000' }, want: { tokenType: B, amount: 300 } });
@@ -169,7 +183,7 @@ try {
   }
   const takenId = refused.value.halfId;
   const sent = calls.posts[0].body;
-  if (sent.makerHalfB64 !== Buffer.from(OFFER).toString('base64') || !sent.takerHalfB64 || 'sponsorSessionId' in sent || sent.idempotencyKey !== 'k1') fail(`sponsorSwap body: ${JSON.stringify(sent).slice(0, 300)}`);
+  if (sent.makerHalfB64 !== Buffer.from(OFFER).toString('base64') || !sent.takerHalfB64 || 'sponsorSessionId' in sent || !/^k1:[0-9a-f]{12}$/.test(sent.idempotencyKey)) fail(`sponsorSwap body: ${JSON.stringify(sent).slice(0, 300)}`);
   w = await mcp.call('get_swap_wallet');
   if (!same(w.value.pendingHalves.map((p) => [p.id, p.role, p.jobId]), [[built.value.id, 'maker', undefined], [takenId, 'taker', undefined]])) fail(`pending halves after the refusal: ${JSON.stringify(w.value.pendingHalves)}`);
   console.log('OK: take_swap_offer compares the terms, a refused swap keeps its half under halfId');

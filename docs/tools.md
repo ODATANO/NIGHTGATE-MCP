@@ -2,7 +2,8 @@
 
 Every tool and what it returns. Writes are built, proven and signed here with
 the caller seed, a sponsor pays the fee, and the tool waits until the job
-settled. Reads of contract state are free. Vault tools default to the shared
+settled. No tool takes a session or names who pays: the server picks the
+sponsor. Reads of contract state are free. Vault tools default to the shared
 sandbox vault of the network and to the `attestation-vault-32` lineage.
 
 ## First anchor
@@ -26,15 +27,15 @@ The first build downloads the prover keys and creates the seed file (see
 | `prepare_document_proof`, `prepare_membership_set` | Build proof inputs: salted content tree, set root |
 | `anchor_document` | Anchor a document hash, optionally with its content root, in one call |
 | `submit_vault_call` | Any vault call in one call: ZK claims over a hidden field, claims across two documents, disclosure, passports |
-| `build_sponsorable_transaction`, `get_attester_identity` | Build a vault call and keep the bytes under a `txId` or in `outFile`, for a sponsor elsewhere. The attester id and shielded keys of the seed |
+| `build_sponsorable_transaction`, `get_attester_identity` | Build a vault call and keep the bytes under a `txId` or in `outFile`, for a sponsor elsewhere. The attester id, shielded keys and NIGHT address of the seed |
 | `sponsor_unbound_transaction`, `sponsor_finalized_transaction` | Hand bytes built elsewhere to a sponsor, by `txId` or `file`, and wait for the job |
-| `get_swap_wallet`, `read_swap_offer` | Shielded coins of the local wallet; what an offer gives and wants |
+| `get_swap_wallet`, `read_swap_offer` | What the local wallet holds, shielded coins and NIGHT; what an offer gives and wants |
 | `build_swap_offer`, `take_swap_offer`, `revert_swap_offer` | Build one half of a shielded swap locally, take an offer, release a half |
 | `sponsor_swap` | Hand both halves of a swap, or a board offer plus the taker half, to a sponsor and wait |
 | `post_swap_offer`, `list_swap_offers`, `retire_swap_offer` | The server's offer board: post a maker half, find open offers, take yours down |
 | `get_swap_offer`, `my_swap_offers`, `get_board_status` | Follow one offer, see your own posts and their fills, read the board's counts without credentials |
 | `mint_token`, `burn_token` | Mint a shielded token with a name of your own on a token factory, the seed is the issuer; burn one this wallet holds |
-| `send_token` | Pay another shielded address from this wallet; the sponsor pays the fee |
+| `send_token` | Pay another address from this wallet, a shielded token or NIGHT; the sponsor pays the fee |
 | `call_contract` | Call a circuit on any contract whose lineage package is installed next to the server, built here and sponsored |
 | `derive_token_type` | Token type a minting contract produces |
 | `get_usage` | What the key has left and what each call cost. Free |
@@ -54,7 +55,7 @@ Errors carry the server's HTTP status and `code` (`INVALID_ARGUMENT`, ...).
 | `statusError` | With `pending`: why the status could not be read |
 | `check` | `{ tool, args }`: the call that shows the effect on-chain |
 | `receipt` | A swap or transfer the block confirmed: the instance's signed statement of the chain facts and the terms. The tool waits for the block; null when that wait ran out first, the same call again fetches it |
-| `idempotencyKey` | The key the server got: the caller's, or one made here when none was given |
+| `idempotencyKey` | The key the server got: the caller's with a suffix that names the call, or one made here when none was given |
 | `deduplicated`, `dedupe` | The job an earlier identical call started; nothing new was sent |
 | `seed` | Only once, when this call created the seed file |
 
@@ -67,6 +68,13 @@ A tool that was cut off, for example by a client timeout, or that came back
 started and submits nothing new, so there is no second fee. The answer then
 says `deduplicated: true`. A second, separate call with the same arguments
 within an hour needs a new `idempotencyKey`.
+
+With an `idempotencyKey` the same holds after a restart of the server. The
+call is built again, the server answers that the key already names a job, and
+the tool returns that job while it runs or once it landed; what it built is
+discarded. A job the chain refused is replaced by a new one under
+`<key>:retry-<n>`. The key names one call: the same key on a call with other
+arguments is another call.
 
 When the sponsor does not answer, the tool sends the same transaction up to
 three times with the same `idempotencyKey`. If no answer comes, the error names
@@ -152,8 +160,11 @@ file and so one identity. For separate identities, give each server its own
 Two wallets exchange two shielded tokens without a contract. Each side builds
 one half, the halves mirror each other, a sponsor merges them and pays the fee.
 The swap wallet syncs its coins from a Midnight indexer: with a gateway key
-through the gateway's indexer lane (1 unit per query, 5 per session), on a
+through the gateway's indexer lane (1 unit per query, 5 per WebSocket session), on a
 direct instance from `NIGHTGATE_INDEXER_HTTP_URL` and `NIGHTGATE_INDEXER_WS_URL`.
+The unshielded coins sync over a WebSocket session of their own. A wallet
+does not start against an indexer that does not answer: the tool fails with
+the host and the reason the indexer gave.
 
 1. `get_swap_wallet`: per token type the balance of the free coins, their
    number, `spendable` and `pending`, what the halves built here bring back
@@ -162,7 +173,10 @@ direct instance from `NIGHTGATE_INDEXER_HTTP_URL` and `NIGHTGATE_INDEXER_WS_URL`
    from balance, and `revert_swap_offer` moves a dropped half back into it.
    The first call starts the sync of the shielded coins (about 5 minutes from
    genesis, seconds with `NIGHTGATE_SWAP_STATE_FILE`). With offers posted from
-   this server it reads their state in one `listSwapOffers` call.
+   this server it reads their state in one `listSwapOffers` call. `unshielded`
+   carries the address a sender pays NIGHT to and per token type, NIGHT first,
+   `balance`, `coins` and `reserved`, what a payment built here holds until it
+   landed. A sync that failed is reported there and leaves the rest intact.
 2. Maker: `build_swap_offer` with `give` and `want` returns the offer file
    (`swapoffer1...`) to publish, or `post_swap_offer` puts it on the server's
    board.
@@ -179,7 +193,8 @@ direct instance from `NIGHTGATE_INDEXER_HTTP_URL` and `NIGHTGATE_INDEXER_WS_URL`
   swap lands or `revert_swap_offer` releases them, by the half's `id` or by the
   board `offerId` of a closed offer. With `NIGHTGATE_SWAP_STATE_FILE` the built
   halves are kept next to the state (`<file>.halves.json`), so a restart lists
-  them again (`restored`) and can still revert them. A maker half whose offer
+  them again (`restored`), can still revert them and still reads the jobs they
+  went into. A maker half whose offer
   expired or was retired 15 minutes ago, and that went into no job, is released
   on its own at the next `get_swap_wallet` or board read (`released`).
   `reserved` in `get_swap_wallet` is the SDK's own list of reserved coins.
@@ -208,6 +223,15 @@ direct instance from `NIGHTGATE_INDEXER_HTTP_URL` and `NIGHTGATE_INDEXER_WS_URL`
   keeps the proven transfer under `halfId` for `revert_swap_offer`. The server
   needs `NIGHTGATE_SPONSOR_ALLOW_TRANSFERS`, the grant `sponsorTransfer`, the
   type the sponsor's list.
+- `send_token({ amount, to, tokenType? })` with an unshielded address
+  (`mn_addr_...`, `nightAddress` of the other side's `get_attester_identity`)
+  pays NIGHT, or the unshielded `tokenType` given. The transfer is built and
+  signed here from the wallet's unshielded coins, which sync on first use, and
+  the server reads type, amount and recipient from it. One such payment or
+  NIGHT pay-in runs at a time; a failed one gives its coins back.
+  `get_swap_wallet` shows the NIGHT the wallet holds under `unshielded`. The
+  server also needs `NIGHTGATE_SPONSOR_ALLOW_UNSHIELDED_OFFERS` and the grant
+  `allowUnshieldedOffers`.
 - `burn_token({ contractAddress, name, amount, issuerKey? })` burns a factory
   token this wallet holds; without `issuerKey` the token is one this wallet
   minted. Same path as `mint_token`: built here, sponsored.
@@ -232,9 +256,9 @@ direct instance from `NIGHTGATE_INDEXER_HTTP_URL` and `NIGHTGATE_INDEXER_WS_URL`
     hour), so both never pick the same coins.
 
   A payout the circuit makes to this wallet (`sendUnshielded`, a claim, a
-  refund) needs nothing extra; NIGHTGATE 0.40.0 sponsors it. A call that funds
-  anything is bound and goes through `sponsorFinalizedTransaction`, one
-  without through the parallel channel. The coins a `$coin` call reserved are
+  refund) needs nothing extra. A call that funds anything is bound and goes
+  through `sponsorFinalizedTransaction`, one without through the parallel
+  channel. The coins a `$coin` call reserved are
   listed in `get_swap_wallet` (role `call`) until the call landed; a call the
   sponsor or the chain refused gives them back. `NIGHTGATE_CALL_PACKAGES`
   limits which packages load.
@@ -254,7 +278,9 @@ direct instance from `NIGHTGATE_INDEXER_HTTP_URL` and `NIGHTGATE_INDEXER_WS_URL`
   tool waits for the block, about a minute after the sponsor sent it; the same
   call again fetches a receipt that wait missed):
   `{ payload, signature, publicKey, algorithm }`, the instance's Ed25519
-  statement of the chain facts and the terms (`declared: true` for a
-  transfer). Check it against the key `getReceiptKey()` on the indexer service
+  statement of the chain facts and the terms. A shielded transfer says
+  `declared: true`, its terms are the sender's statement; an unshielded one
+  says `declared: false` and names the recipient, read from the transaction.
+  Check it against the key `getReceiptKey()` on the indexer service
   publishes, without reading the board.
 

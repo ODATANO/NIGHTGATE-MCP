@@ -2,7 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { awaitJob, chainOutcome, markReused, startOnce, startSponsored } from '../../dist/jobs.js';
-import { NightgateApiError } from '../../dist/client.js';
+import { apiError, NightgateApiError } from '../../dist/client.js';
 
 const timeout = () => Object.assign(new Error('The operation was aborted due to timeout'), { name: 'TimeoutError' });
 
@@ -46,11 +46,15 @@ test('a repeated identical call gets the first job and says so', async () => {
   assert.match(marked.dedupe, /new idempotencyKey/);
 });
 
-test('the server always gets an idempotency key: the caller\'s, or one made here', async () => {
-  const client = fakeClient([{ jobId: 'a' }, { jobId: 'b' }]);
+test('the server always gets an idempotency key: the caller\'s with the call it names, or one made here', async () => {
+  const client = fakeClient([{ jobId: 'a' }, { jobId: 'b' }, { jobId: 'c' }]);
   const own = await startSponsored(client, 'k-own', 'caller-key', async (k) => ({ action: 'x', body: { k } }));
-  assert.equal(client.calls[0].body.k, 'caller-key');
-  assert.equal(own.job.idempotencyKey, 'caller-key');
+  assert.equal(client.calls[0].body.k, 'caller-key:k-own');
+  assert.equal(own.job.idempotencyKey, 'caller-key:k-own');
+  // the same caller key on another call is another server key, so the two never collide
+  await startSponsored(client, 'k-other', 'caller-key', async (k) => ({ action: 'x', body: { k } }));
+  assert.equal(client.calls[1].body.k, 'caller-key:k-other');
+  client.calls.splice(1, 1);
   const made = await startSponsored(client, 'k-made', undefined, async (k) => ({ action: 'x', body: { k } }));
   assert.match(client.calls[1].body.k, /^mcp-[0-9a-f-]{36}$/);
   assert.equal(made.job.idempotencyKey, client.calls[1].body.k);
@@ -116,6 +120,58 @@ test('a server answer like 503 with a code is a refusal, not a lost answer', asy
 test('a caller key that names an earlier build takes the next retry key', async () => {
   const client = fakeClient([new NightgateApiError(409, 'IDEMPOTENCY_KEY_CONFLICT', 'used with a different payload'), { jobId: 'rebuilt' }]);
   const started = await startSponsored(client, 'k-conflict', 'pay-1', async (k) => ({ action: 'x', body: { idempotencyKey: k } }));
-  assert.deepEqual(client.calls.map((c) => c.body.idempotencyKey), ['pay-1', 'pay-1:retry-1']);
-  assert.equal(started.job.idempotencyKey, 'pay-1:retry-1');
+  assert.deepEqual(client.calls.map((c) => c.body.idempotencyKey), ['pay-1:k-conflict', 'pay-1:k-conflict:retry-1']);
+  assert.equal(started.job.idempotencyKey, 'pay-1:k-conflict:retry-1');
+});
+
+const conflictNaming = (job) => new NightgateApiError(409, 'IDEMPOTENCY_KEY_CONFLICT', 'used with a different payload', { job });
+
+test('a key that names a running or landed job gives that job back: nothing is sent again, the build is discarded', async () => {
+  for (const [n, held] of [{ jobId: 'first', status: 'running', chainStatus: null }, { jobId: 'first', status: 'succeeded', chainStatus: 'success' }].entries()) {
+    const released = [];
+    const client = fakeClient([conflictNaming(held)]);
+    const started = await startSponsored(client, `k-held-${n}`, 'pay-2', async (k) => ({
+      action: 'x', body: { idempotencyKey: k }, info: { terms: 'same call' },
+      discard: async () => { released.push('discard'); }, onRefused: async () => { released.push('refused'); },
+      onSent: () => { released.push('sent'); },
+    }));
+    assert.equal(client.calls.length, 1);
+    assert.deepEqual(released, ['discard']);
+    assert.equal(started.job.jobId, 'first');
+    assert.equal(started.job.status, held.status);
+    assert.equal(started.job.terms, 'same call');
+    assert.equal(started.job.deduplicated, true);
+    assert.match(started.job.dedupe, /already names job first[\s\S]*Nothing new was sent/);
+  }
+});
+
+test('without a discard of its own the adopted call releases through onRefused', async () => {
+  const released = [];
+  const client = fakeClient([conflictNaming({ jobId: 'first', status: 'submitted', chainStatus: 'pending' })]);
+  await startSponsored(client, 'k-held-refused', 'pay-3', async (k) => ({ action: 'x', body: { idempotencyKey: k }, onRefused: async () => { released.push('refused'); } }));
+  assert.deepEqual(released, ['refused']);
+});
+
+test('a key that names a job the chain refused takes the next key and sends', async () => {
+  const client = fakeClient([conflictNaming({ jobId: 'first', status: 'succeeded', chainStatus: 'dropped' }), { jobId: 'second' }]);
+  const started = await startSponsored(client, 'k-dropped', 'pay-4', async (k) => ({ action: 'x', body: { idempotencyKey: k } }));
+  assert.deepEqual(client.calls.map((c) => c.body.idempotencyKey), ['pay-4:k-dropped', 'pay-4:k-dropped:retry-1']);
+  assert.equal(started.job.jobId, 'second');
+  assert.equal(started.job.deduplicated, undefined);
+});
+
+test('a job is read by its id alone when no session is known', async () => {
+  const client = fakeClient([{ jobId: 'j-plain', status: 'succeeded', chainStatus: 'success' }]);
+  const job = await awaitJob(client, { timeoutMs: 30_000 }, { jobId: 'j-plain', status: 'running' }, undefined);
+  assert.equal(job.status, 'succeeded');
+  assert.equal(client.calls[0].action, 'getJobStatus');
+  assert.equal(client.calls[0].body.jobId, 'j-plain');
+  assert.equal(client.calls[0].body.sessionId, undefined);
+});
+
+test('an error body that names the job of a key conflict keeps it', () => {
+  const body = { error: { code: 'IDEMPOTENCY_KEY_CONFLICT', message: 'used', '@nightgate.job': { jobId: 'j1', status: 'succeeded', chainStatus: 'success' } } };
+  const err = apiError(409, body, new Headers(), 'fallback');
+  assert.deepEqual(err.detail, { job: { jobId: 'j1', status: 'succeeded', chainStatus: 'success' } });
+  assert.equal(apiError(409, { error: { code: 'IDEMPOTENCY_KEY_CONFLICT', message: 'used' } }, new Headers(), 'fallback').detail, undefined);
 });

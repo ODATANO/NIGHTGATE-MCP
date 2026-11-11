@@ -9,7 +9,7 @@ import { dirname } from 'node:path';
 import { NO_INDEXER, walletIndexer, type NightgateMcpConfig } from './config.js';
 import { txExport } from './tx-module.js';
 import { ensureSeed } from './seed.js';
-import { chainOutcome, setStage } from './jobs.js';
+import { chainOutcome, rememberJob, setStage } from './jobs.js';
 
 export interface SwapLeg {
   tokenType: string;
@@ -95,8 +95,9 @@ interface PendingHalf {
   builtAt: number;
   /** Both halves of a taken offer, so it can be submitted by id. */
   halves?: { makerHalfB64: string; takerHalfB64: string };
-  /** The sponsor job the half went into. */
+  /** The sponsor job the half went into, and the session its status is read under. */
   jobId?: string;
+  jobSession?: string;
   /** The board entry a maker half was posted as, and its last read status. */
   offerId?: string;
   boardStatus?: string;
@@ -193,6 +194,7 @@ async function restoreHalves(path: string | undefined, wallet: any): Promise<voi
   try { rows = JSON.parse(text); } catch { throw new Error(`pending halves ${path} is not JSON; move it aside`); }
   for (const { id, ...rest } of rows) {
     if (pending.has(id) || typeof rest.bytes !== 'string') continue;
+    if (rest.jobId && rest.jobSession) rememberJob(rest.jobId, rest.jobSession);
     pending.set(id, {
       ...rest,
       restored: true,
@@ -523,9 +525,13 @@ export function takenHalves(id: string): { makerHalfB64: string; takerHalfB64: s
 }
 
 /** Remembers the sponsor job a half went into. An id this process does not hold is ignored. */
-export function trackHalfJob(id: string, jobId: unknown): void {
+export function trackHalfJob(id: string, job: { jobId?: unknown; sessionId?: unknown }): void {
   const half = pending.get(id);
-  if (half && typeof jobId === 'string') { half.jobId = jobId; delete half.chainStatus; schedulePersist(); }
+  if (!half || typeof job.jobId !== 'string') return;
+  half.jobId = job.jobId;
+  if (typeof job.sessionId === 'string') half.jobSession = job.sessionId;
+  delete half.chainStatus;
+  schedulePersist();
 }
 
 /** Job ids of the halves still listed, so the caller can ask whether their swap landed. */

@@ -10,6 +10,7 @@ import {
 } from './swap.js';
 import { buildBurn, buildMint } from './factory.js';
 import { buildContractCall, nightCallSent } from './contract-call.js';
+import { buildUnshieldedTransfer, unshieldedInfo } from './unshielded.js';
 import { randomBytes } from 'node:crypto';
 import { resolveTxSource } from './built.js';
 import { awaitJob, callStage, chainOutcome, forgetStart, jobSession, markReused, startSponsored, type JobCheck, type ToolExtra } from './jobs.js';
@@ -54,6 +55,7 @@ const MAX_SLOT_WIDTH = 32;
 
 const RETRY_HINT = 'If the call was cut off or came back pending, run it again with the same arguments: ' +
   'it picks up the job it started and submits nothing new (the answer says deduplicated). ' +
+  'With an idempotencyKey that also holds after a restart of this server. ' +
   'A second, separate call with the same arguments needs a new idempotencyKey.';
 const RECEIPT_HINT = 'The tool also waits for the block (about a minute more) and then carries the instance\'s signed ' +
   'receipt; if that wait runs out, receipt is null and the same call again fetches it. ';
@@ -124,9 +126,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
   const settleOpenJobs = async (): Promise<void> => {
     if (!config) return;
     for (const jobId of new Set([...halfJobIds(), ...callSettlers.keys()])) {
-      const sessionId = jobSession(jobId);
-      if (!sessionId) continue;
-      const job = await client.callAction('getJobStatus', { jobId, sessionId }).catch(() => undefined) as Record<string, unknown> | undefined;
+      const job = await client.callAction('getJobStatus', { jobId, sessionId: jobSession(jobId) }).catch(() => undefined) as Record<string, unknown> | undefined;
       if (!job) continue;
       await settleHalfJob(config, jobId, job);
       await settleCall(jobId, job);
@@ -242,7 +242,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         attesterIdB: hex64('attesterIdB').optional()
           .describe('Cross-root kinds: document B\'s attester; defaults to attesterId'),
         allowedMask: z.number().int().min(0).max(MAX_MASK).optional()
-          .describe('documentIntegrity only: the packed slot mask that was proven (16 bits by default, 32 on attestation-vault-32)'),
+          .describe('documentIntegrity only: the packed slot mask that was proven (32 bits; 16 on a 16-slot attestation-vault)'),
         k: z.number().int().min(1).max(MAX_SLOT_WIDTH).optional()
           .describe('documentDiff only: the k that was proven'),
         network: z.enum(['preview', 'preprod', 'mainnet']).optional()
@@ -291,13 +291,13 @@ export function registerTools(server: McpServer, client: NightgateClient, config
       description:
         'Turn a structured document into everything the proof tools need: canonical JSON and its ' +
         'payloadHash (what anchor_document anchors), a Merkle contentRoot over an ORDERED list of ' +
-        'up to 16 proof fields, and per-field inclusion paths ready for the proveField* calls of ' +
-        'submit_vault_call. kind "uint" (default) scales a numeric ' +
-        'value; kind "bytes" (NIGHTGATE >= 0.16.0) enters a STRING field as the digest of the ' +
+        'up to 32 proof fields (16 on a 16-slot attestation-vault), and per-field inclusion paths ' +
+        'ready for the proveField* calls of submit_vault_call. kind "uint" (default) scales a numeric ' +
+        'value; kind "bytes" enters a STRING field as the digest of the ' +
         'exact string, feeding the equality/membership proofs. Keep the field order stable across ' +
         'anchor and proof: it is part of the tree identity. Compute-only and synchronous, nothing ' +
         'is stored server-side. Leaves are SALTED: the response carries a per-field `salt` (feed it ' +
-        'back as fieldSalt / claim salt), the full `opening` (salt seed + all 16 slots, needed for ' +
+        'back as fieldSalt / claim salt), the full `opening` (salt seed + every slot, needed for ' +
         'the cross-root proofs) and `schemaId` (anchor it alongside the root). STORE the opening ' +
         'with the document: losing the salt seed makes the anchored root unprovable, publishing it ' +
         'makes leaf hashes guessable. Pass saltSeed to reproduce an EXISTING anchored root ' +
@@ -314,7 +314,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
             .describe("Leaf kind: 'uint' (default, numeric scaled value) or 'bytes' (string value entered as digest of the exact string)"),
           scale: z.number().int().min(1).max(1_000_000_000).optional()
             .describe("Value scale (default 1000: milli-units); only valid for kind 'uint'"),
-        })).min(1).max(MAX_SLOT_WIDTH).describe('ORDERED list of fields to make provable (leaf index = position). Up to 16 on the default vault, up to 32 with compiledArtifactRef attestation-vault-32'),
+        })).min(1).max(MAX_SLOT_WIDTH).describe('ORDERED list of fields to make provable (leaf index = position). Up to 32 on the default attestation-vault-32, up to 16 with compiledArtifactRef attestation-vault'),
         saltSeed: hex64('saltSeed').optional()
           .describe('Reuse a stored salt seed to reproduce an already-anchored root; omit for a fresh document (random seed)'),
         compiledArtifactRef: z.string().optional().describe("Contract artifact ref, defaults to 'attestation-vault-32'; 'attestation-vault' for a 16-slot vault"),
@@ -333,8 +333,8 @@ export function registerTools(server: McpServer, client: NightgateClient, config
     'prepare_membership_set',
     {
       description:
-        'Build the canonical depth-6 membership-set tree over a public allow-list (NIGHTGATE ' +
-        '>= 0.16.0). Deterministic rule (digest each exact string, dedupe, sort ascending, pad by ' +
+        'Build the canonical depth-6 membership-set tree over a public allow-list. ' +
+        'Deterministic rule (digest each exact string, dedupe, sort ascending, pad by ' +
         'repeating the last member digest), so ANYONE recomputes the same setRoot from the ' +
         'published list alone: use the root to verify_predicate a setMembership claim. With ' +
         'value/valueDigest it additionally returns the member inclusion path (witness material, ' +
@@ -491,8 +491,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         'bound with bind:true (sponsor_finalized_transaction). The on-chain effect carries the attester id ' +
         'of THIS builder (returned). Proving takes 20-60 s in-process (the first call also ' +
         'fetches the prover keys from the NIGHTGATE /zk-config); NIGHTGATE_PROOF_SERVER_URL ' +
-        'switches to a proof server. Needs @odatano/nightgate-tx installed next to the MCP ' +
-        'server. params by call: attest {payloadHash, metadataHash}; anchorContentRoot ' +
+        'switches to a proof server. params by call: attest {payloadHash, metadataHash}; anchorContentRoot ' +
         '{payloadHash, contentRoot, schemaId}; grantDisclosure {payloadHash, grantee, level 0|1|2}; ' +
         'revokeDisclosure {payloadHash, grantee}; registerPassport {passportId, ownerId}; ' +
         'bindPassport {passportId, payloadHash}. The owner-gated calls address THIS builder\'s own ' +
@@ -544,7 +543,8 @@ export function registerTools(server: McpServer, client: NightgateClient, config
       description:
         'The attester id this MCP server builds under (derived from the caller seed via the ' +
         'txbuilder), plus the network, the shielded address and the two public shielded keys ' +
-        '(what a sender needs to create a coin for this wallet). Use it to check ' +
+        '(what a sender needs to create a coin for this wallet) and nightAddress, the unshielded ' +
+        'address a sender pays NIGHT to. Use it to check ' +
         'verify_attestation results against the identity that will appear on-chain; builds ' +
         'nothing and submits nothing.',
       inputSchema: {},
@@ -559,15 +559,14 @@ export function registerTools(server: McpServer, client: NightgateClient, config
     'sponsor_finalized_transaction',
     {
       description:
-        'Cross-server fee sponsoring, phase 2 (NIGHTGATE 0.17.0): submit a FINALIZED, fee-unpaid ' +
-        'transaction that was built, proven and signed elsewhere (e.g. with the ' +
+        'Hand a FINALIZED, fee-unpaid transaction to the sponsor: one that was built, proven and ' +
+        'signed elsewhere (build_sponsorable_transaction with bind:true, or the ' +
         "@odatano/nightgate-tx txbuilder, so the caller's key never left its machine). The " +
-        "sponsor session pays the dust; the on-chain effect carries the BUILDER's identity, not " +
-        "the sponsor's. The server enforces its contract/circuit allow-list and rejects anything " +
-        'outside it. The transaction expires with its TTL (default 30 min), so hand it over ' +
-        'promptly. This is the SERIAL channel (one tx per sponsor wallet at a time); for ' +
-        'parallel submission build with bind:false and use sponsor_unbound_transaction. ' +
-        'The server picks the wallet that pays. ' + RECEIPT_HINT + WAIT_HINT,
+        "sponsor pays the fee and submits; the on-chain effect carries the BUILDER's identity, not " +
+        "the sponsor's. The server picks the wallet that pays, applies its contract and circuit " +
+        'list and refuses anything outside it. The transaction expires with its TTL (default 30 min), ' +
+        'so hand it over promptly. This is the SERIAL channel; for parallel submission build with ' +
+        'bind:false and use sponsor_unbound_transaction. ' + WAIT_HINT,
       inputSchema: {
         txId: TX_ID.describe('txId returned by build_sponsorable_transaction (bind:true) on this server; the bytes never pass through the conversation'),
         file: TX_FILE,
@@ -587,14 +586,12 @@ export function registerTools(server: McpServer, client: NightgateClient, config
     'sponsor_unbound_transaction',
     {
       description:
-        'Cross-server fee sponsoring, PARALLEL channel (NIGHTGATE 0.18.0): submit an UNBOUND ' +
-        '(pre-binding) proven+signed caller transaction, built with the @odatano/nightgate-tx ' +
+        'Hand an UNBOUND (pre-binding), proven and signed transaction to the sponsor, the PARALLEL ' +
+        'channel: one built by build_sponsorable_transaction, or by the @odatano/nightgate-tx ' +
         "txbuilder's buildSponsorable({ bind: false }) (the caller's key never left its machine). " +
-        'The sponsor locks one free dust backing, merges its dust spend, binds and submits; only ' +
-        'the dust build takes the per-wallet lock, so ONE sponsor wallet sponsors N transactions ' +
-        'at once (N = its registered dust backings; live: several in the same block). Same ' +
-        'allow-list policy and grant surface as sponsor_finalized_transaction; do not mix ' +
-        'both channels on one sponsor wallet. Contract state is account-style: two sponsored ' +
+        'The sponsor adds its fee, binds and submits, several transactions at once. The server ' +
+        'picks the wallet that pays and applies the same contract and circuit list as ' +
+        'sponsor_finalized_transaction. Contract state is account-style: two sponsored ' +
         'calls against the SAME contract in one block conflict, the loser lands on-chain but its ' +
         'call does not apply and the job ends failed with errorCode CHAIN_EXECUTION_FAILED (the ' +
         'transaction hash is in the error); then REBUILD the transaction against the current ' +
@@ -618,7 +615,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
     'get_swap_wallet',
     {
       description:
-        'The shielded wallet this MCP server swaps from (the caller seed): address, ' +
+        'What the wallet of this MCP server (the caller seed) holds, shielded and unshielded. Shielded: address, ' +
         'public keys, and per token type the balance of the free coins, their number, `spendable`, ' +
         'the most ONE swap half can give (what its largest coins hold, up to maxInputs coins), and ' +
         '`pending`, what the halves built here bring back once their swaps land (the change and the ' +
@@ -628,8 +625,10 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         'process marked restored) and the coins the SDK holds reserved (reserved, each with its ttl); one posted with ' +
         'post_swap_offer carries offerId and boardStatus and leaves the list once its offer filled. A maker half whose ' +
         'offer expired or was retired 15 minutes ago and that went into no job is released here on its own (released). ' +
-        'The wallet syncs its shielded coins only; a first sync from genesis takes about 5 minutes, during which the ' +
-        'answer is { synced: false, syncingSeconds }: call again. Spends nothing.',
+        'Unshielded, under `unshielded`: the address a sender pays NIGHT to (mn_addr_...) and per token type, NIGHT ' +
+        'first, the balance of the free coins, their number and `reserved`, what a payment built here holds until it ' +
+        'landed. A first sync of the shielded coins from genesis takes about 5 minutes, during which the answer is ' +
+        '{ synced: false, syncingSeconds }: call again; the unshielded coins sync in seconds. Spends nothing.',
       inputSchema: {},
     },
     run(async () => {
@@ -637,7 +636,8 @@ export function registerTools(server: McpServer, client: NightgateClient, config
       if (postedOfferIds().length) await settlePostedOffers();
       await settleOpenJobs();
       const released = await releaseLapsedHalves(config);
-      return { ...await swapWalletInfo(config), ...(released.length ? { released } : {}) };
+      const [wallet, unshielded] = await Promise.all([swapWalletInfo(config), unshieldedInfo(config)]);
+      return { ...wallet, ...(unshielded ? { unshielded } : {}), ...(released.length ? { released } : {}) };
     }),
   );
 
@@ -741,9 +741,10 @@ export function registerTools(server: McpServer, client: NightgateClient, config
           },
           info: { id: taken.id, terms: taken.terms, bound: taken.bound, buildMs: taken.buildMs },
           detail: { halfId: taken.id },
+          discard: async () => { await revertHalf(config, taken.id); },
         };
       });
-      trackHalfJob(String(started.job.id), started.job.jobId);
+      trackHalfJob(String(started.job.id), started.job);
       const settled = await awaitSwap(started.job, args.offerId, extra);
       if (chainOutcome(settled) === 'failed') forgetStart(key);
       return markReused(settled, started, !!args.idempotencyKey);
@@ -822,7 +823,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         action: 'sponsorSwap',
         body: { ...halves, idempotencyKey: k, ...(args.takerSecret ? { takerSecret: args.takerSecret } : {}) },
       }));
-      if (args.halfId) trackHalfJob(args.halfId, started.job.jobId);
+      if (args.halfId) trackHalfJob(args.halfId, started.job);
       const settled = await awaitSwap(started.job, args.offerId, extra);
       if (chainOutcome(settled) === 'failed') forgetStart(key);
       return markReused(settled, started, !!args.idempotencyKey);
@@ -840,7 +841,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         'swap that spends one of its inputs lands, on expiry, or by retire_swap_offer. Needs ' +
         'postSwapOffer in an agent grant\'s allowedActions. Returns { offerId, status, terms }. ' +
         'With directed: true only a taker who knows the returned takerSecret can have the swap ' +
-        'sponsored: hand that secret to your counterparty, it is shown once (needs NIGHTGATE 0.39.0).',
+        'sponsored: hand that secret to your counterparty, it is shown once.',
       inputSchema: {
         offer: swapHalf('The maker half, as offer file text or base64'),
         expiresAt: z.string().datetime().optional().describe('ISO timestamp; at most 90 days ahead'),
@@ -881,7 +882,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         status: OFFER_STATUS.optional().describe('Default open'),
         since: z.string().datetime().optional().describe('ISO timestamp; only offers changed after it'),
         waitMs: z.number().int().min(0).max(BOARD_WAIT_MAX_MS).optional()
-          .describe('Hold the call while nothing matches, up to this many ms (at most 25000); needs NIGHTGATE 0.38.0'),
+          .describe('Hold the call while nothing matches, up to this many ms (at most 25000)'),
       },
     },
     run(async (args) => settleRows(await listOffers(client, { ...args, mine: null }))),
@@ -901,7 +902,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         since: z.string().datetime().optional().describe('ISO timestamp; only offers changed after it'),
         limit: z.number().int().min(1).max(200).optional().describe('Default 50'),
         waitMs: z.number().int().min(0).max(BOARD_WAIT_MAX_MS).optional()
-          .describe('Hold the call while nothing matches, up to this many ms (at most 25000); needs NIGHTGATE 0.38.0'),
+          .describe('Hold the call while nothing matches, up to this many ms (at most 25000)'),
       },
     },
     run(async (args) => settleRows(await listOffers(client, { status: args.status ?? 'all', since: args.since, limit: args.limit, mine: true, waitMs: args.waitMs }))),
@@ -941,7 +942,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         'Take an offer off the board. Only its poster may; the coins behind the half stay ' +
         'reserved until revert_swap_offer releases the half built here (or until the 15-minute release of ' +
         'get_swap_wallet). Returns { offerId, status }: retired, or the status of an offer already closed ' +
-        '(expired, retired, filled), so a lapsed offer answers expired instead of an error (NIGHTGATE 0.40.0).',
+        '(expired, retired, filled), so a lapsed offer answers expired instead of an error.',
       inputSchema: {
         offerId: z.string().uuid().describe('The board entry'),
       },
@@ -957,7 +958,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         'chain access). A custom token is addressed by rawTokenType(domainSeparator, ' +
         'contractAddress); without it the minted balance cannot be transferred. domainSeparator ' +
         'is the plain string the contract pads (Compact pad(32, "...")) or 64 hex for the padded ' +
-        "bytes; defaults to the bundled test token's. The result feeds sendNight(tokenTypeHex).",
+        "bytes; defaults to the bundled test token's. The result is the tokenType of send_token and the swap tools.",
       inputSchema: {
         contractAddress: z.string().min(1).describe('The minting contract address (64 hex)'),
         domainSeparator: z.string().optional()
@@ -1056,25 +1057,55 @@ export function registerTools(server: McpServer, client: NightgateClient, config
     'send_token',
     {
       description:
-        'Send an amount of a shielded token from this wallet to another shielded address, with the ' +
-        'sponsor paying the fee: a payout, a salary, an invoice settlement. The transfer is built and ' +
-        'proven here from the wallet\'s coins (at most maxInputs of them); only the fee-unpaid bytes go ' +
-        'to the server, which records the declared type and amount and submits. The recipient needs ' +
-        'nothing but its address. Needs sponsorTransfer in the grant, the type on the sponsor\'s list ' +
-        'and NIGHTGATE 0.39.0. ' + RECEIPT_HINT + WAIT_HINT,
+        'Send an amount from this wallet to another address, with the sponsor paying the fee: a payout, ' +
+        'a salary, an invoice settlement. The address decides what moves. To a shielded address ' +
+        '(mn_shield-addr_...) a shielded token goes: the transfer is built and proven here from the ' +
+        'wallet\'s coins (at most maxInputs of them), and the server records the declared type and ' +
+        'amount. To an unshielded address (mn_addr_...) NIGHT goes, or the unshielded tokenType given: ' +
+        'the transfer is built and signed here from the wallet\'s unshielded coins, which sync on first ' +
+        'use, and the server reads type, amount and recipient from it. One such payment or NIGHT pay-in ' +
+        'runs at a time. get_swap_wallet shows what the wallet holds of either kind. Only the fee-unpaid ' +
+        'bytes go to the server. The recipient needs nothing but its ' +
+        'address. Needs sponsorTransfer in the grant and the type on the sponsor\'s list; an unshielded ' +
+        'address also needs allowUnshieldedOffers on the grant. ' + RECEIPT_HINT + WAIT_HINT,
       inputSchema: {
-        tokenType: hex64('tokenType').describe('Raw token type (64 hex), what derive_token_type or mint_token returns'),
+        tokenType: hex64('tokenType').optional()
+          .describe('Raw token type (64 hex), what derive_token_type or mint_token returns; required for a shielded address, default NIGHT for an unshielded one'),
         amount: z.union([
           z.string().regex(/^[1-9]\d*$/, 'amount must be a positive integer (decimal string)'),
           z.number().int().positive().safe(),
         ]).describe('Atoms to send; a decimal string is exact'),
-        to: z.string().min(16).describe('The recipient\'s shielded address (mn_shield-addr_...), as its get_attester_identity or get_swap_wallet shows it'),
+        to: z.string().min(16).describe('The recipient\'s address as its get_attester_identity shows it: shieldedAddress (mn_shield-addr_...) or nightAddress (mn_addr_...)'),
         idempotencyKey: z.string().optional().describe('Dedupes retries'),
       },
     },
     run(async (args, extra) => {
       if (!config) throw new Error('transfers are not configured for this server instance');
-      const input = { tokenType: args.tokenType.toLowerCase(), amount: String(args.amount), to: args.to.trim() };
+      const to = args.to.trim();
+      if (to.startsWith('mn_addr_')) {
+        const payment = { ...(args.tokenType ? { tokenType: args.tokenType.toLowerCase() } : {}), amount: String(args.amount), to };
+        const key = callKey('sendToken', payment, args.idempotencyKey ?? null);
+        if (callSettlers.size) await settleOpenJobs();
+        const started = await startSponsored(client, key, args.idempotencyKey, async (k) => {
+          const { transferTxB64, settle, ...built } = await buildUnshieldedTransfer(config, payment, key);
+          return {
+            action: 'sponsorTransfer',
+            body: { transferTxB64, tokenType: built.terms.tokenType, amount: built.terms.amount, idempotencyKey: k },
+            info: { terms: built.terms, inputs: built.inputs, buildMs: built.buildMs },
+            onRefused: () => settle('failed'),
+            onSent: (job) => {
+              nightCallSent(transferTxB64, job.jobId);
+              if (typeof job.jobId === 'string') callSettlers.set(job.jobId, settle);
+            },
+          };
+        });
+        const job = await awaitJob(client, config, started.job, extra, { tool: 'get_swap_wallet', args: {} });
+        if (typeof started.job.jobId === 'string') await settleCall(started.job.jobId, job);
+        if (chainOutcome(job) === 'failed') forgetStart(key);
+        return markReused(job, started, !!args.idempotencyKey);
+      }
+      if (!args.tokenType) throw new Error('tokenType is required for a shielded address; only a payment to an unshielded address (mn_addr_...) defaults to NIGHT');
+      const input = { tokenType: args.tokenType.toLowerCase(), amount: String(args.amount), to };
       const key = callKey('sendToken', input, args.idempotencyKey ?? null);
       const started = await startSponsored(client, key, args.idempotencyKey, async (k) => {
         const built = await buildTransfer(config, input);
@@ -1083,9 +1114,10 @@ export function registerTools(server: McpServer, client: NightgateClient, config
           body: { transferTxB64: built.transferTxB64, tokenType: input.tokenType, amount: input.amount, idempotencyKey: k },
           info: { id: built.id, terms: built.terms, inputs: built.inputs, buildMs: built.buildMs },
           detail: { halfId: built.id },
+          discard: async () => { await revertHalf(config, built.id); },
         };
       });
-      trackHalfJob(String(started.job.id), started.job.jobId);
+      trackHalfJob(String(started.job.id), started.job);
       const job = await awaitJob(client, config, started.job, extra, { tool: 'get_swap_wallet', args: {} });
       if (typeof started.job.jobId === 'string') await settleHalfJob(config, started.job.jobId, job);
       if (chainOutcome(job) === 'failed') forgetStart(key);
@@ -1108,7 +1140,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         'takes from this wallet (receiveUnshielded, a deposit or a stake): the wallet syncs its NIGHT coins ' +
         'and pays them in, the sponsor adds only the fee; set payUnshielded when the amount is no argument. ' +
         'Needs allowUnshieldedOffers on the grant; one pay-in runs at a time. A payout the circuit makes to this wallet (sendUnshielded, ' +
-        'a claim or a refund) needs nothing extra: NIGHTGATE 0.40.0 sponsors it. A call that funds anything is ' +
+        'a claim or a refund) needs nothing extra. A call that funds anything is ' +
         'bound and goes through the serial sponsor channel, one without through the parallel one. ' +
         'Witnesses come from the package when its contract.json names a witnesses module (createWitnesses ' +
         'gets a secret derived from the seed for that package; the private state they return is kept once the call landed). The contract has to be sponsorable (its ' +
@@ -1154,7 +1186,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         };
       });
       const jobId = typeof started.job.jobId === 'string' ? started.job.jobId : undefined;
-      if (jobId && typeof started.job.pendingId === 'string') trackHalfJob(started.job.pendingId, jobId);
+      if (jobId && typeof started.job.pendingId === 'string') trackHalfJob(started.job.pendingId, started.job);
       const job = await awaitJob(client, config, started.job, extra);
       if (jobId) {
         await settleHalfJob(config, jobId, job);

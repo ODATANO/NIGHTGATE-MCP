@@ -17,7 +17,7 @@ NIGHTGATE instance, and which versions it needs.
 | `NIGHTGATE_NODE_URL` | unset | A Midnight node of your own, for builders that read your indexer. There is no default: Midnight retired its hosted preprod and mainnet hosts |
 | `NIGHTGATE_PROOF_SERVER_URL` | unset | Prove on a proof server instead of in-process |
 | `NIGHTGATE_SANDBOX_VAULT` | the network's sandbox vault | `attestation-vault-32` a call without `contractAddress` targets, 64 hex. Mainnet has no default |
-| `NIGHTGATE_SWAP_STATE_FILE` | unset | File for the wallet's state; it holds the wallet's coins, keep it like a key. Next to it: `<file>.halves.json` (halves and `$coin` calls built here, so a restart can still revert them), `<file>.unshielded` (the NIGHT coins of `call_contract`), `<file>.private.json` (private states of package witnesses), `<file>.lock` (one MCP server per file) |
+| `NIGHTGATE_SWAP_STATE_FILE` | unset | File for the wallet's state; it holds the wallet's coins, keep it like a key. Next to it: `<file>.halves.json` (halves and `$coin` calls built here, so a restart can still revert them), `<file>.unshielded` (the unshielded coins of `call_contract` and `send_token`), `<file>.private.json` (private states of package witnesses), `<file>.lock` (one MCP server per file) |
 | `NIGHTGATE_CALL_PACKAGES` | unset | Comma list of the lineage packages `call_contract` may load; unset = every installed one. A package runs its own code here, so list them on a shared machine |
 | `NIGHTGATE_SWAP_MAX_INPUTS` | `4` | Most coins one swap half spends; the sponsor's limit applies |
 | `NIGHTGATE_TIMEOUT_MS` | `30000` | Per-request timeout |
@@ -45,8 +45,9 @@ sponsored call.
 
 ## Compatibility
 
-NIGHTGATE >= 0.42.3 on a ledger 9 network; a network before its fork stays on
-MCP 0.21.0. `call_contract` needs the lineage package next to the server, a
+NIGHTGATE >= 0.43.1 on a ledger 9 network; a network before its fork stays on
+MCP 0.21.0. `send_token` to an unshielded address needs `sponsorTransfer` and
+`allowUnshieldedOffers` on the grant. `call_contract` needs the lineage package next to the server, a
 `$night` pay-in needs `allowUnshieldedOffers` on the grant.
 `build_sponsorable_transaction` builds on contracts deployed after ledger 9. A
 contract deployed before keeps its ledger 8 verifier keys; `call_contract` builds

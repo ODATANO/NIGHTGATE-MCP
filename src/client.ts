@@ -6,7 +6,7 @@ export class NightgateApiError extends Error {
     public readonly status: number,
     public readonly code: string | undefined,
     message: string,
-    /** `retryAfterSeconds` from `Retry-After`, plus the extra fields of a gateway error body (unitsLeft, price, topup, products, validUntil). */
+    /** `retryAfterSeconds` from `Retry-After`, `job` of a key conflict, plus the extra fields of a gateway error body (unitsLeft, price, topup, products, validUntil). */
     public readonly detail?: Record<string, unknown>,
   ) {
     super(message);
@@ -28,9 +28,14 @@ export function apiError(status: number, payload: unknown, headers: Headers, fal
     if (retry) detail.retryAfterSeconds = Number(retry);
     return new NightgateApiError(status, undefined, err, Object.keys(detail).length ? detail : undefined);
   }
-  const e = (err ?? {}) as { code?: string; message?: string };
+  const e = (err ?? {}) as { code?: string; message?: string; '@nightgate.job'?: unknown };
   const retry = headers.get('retry-after');
-  return new NightgateApiError(status, e.code, e.message ?? fallback, retry ? { retryAfterSeconds: Number(retry) } : undefined);
+  const job = e['@nightgate.job'];
+  const detail: Record<string, unknown> = {
+    ...(retry ? { retryAfterSeconds: Number(retry) } : {}),
+    ...(job && typeof job === 'object' ? { job } : {}),
+  };
+  return new NightgateApiError(status, e.code, e.message ?? fallback, Object.keys(detail).length ? detail : undefined);
 }
 
 /**
