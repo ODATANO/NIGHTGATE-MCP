@@ -7,6 +7,29 @@ The README says which NIGHTGATE the current version needs.
 
 ## [Unreleased]
 
+## [0.23.1] - 2026-11-18
+
+Needs NIGHTGATE 0.43.1.
+
+### Changed
+
+- `@odatano/nightgate-tx` 0.24.1, on the Midnight tooling patch of 2026-11-17:
+  midnight-js 5.0.1, compact-js 3.0.2, `@midnightntwrk/ledger-v9` 1.0.2 and
+  wallet SDK facade 5.0.1.
+
+### Fixed
+
+- A contract call builds again after a map write left the contract's state in
+  a trie shape the earlier ledger refused. Before, `anchor_document`,
+  `submit_vault_call`, `build_sponsorable_transaction`, `call_contract`,
+  `mint_token` and `burn_token` failed on such a contract with
+  `Unable to deserialize ContractState`.
+- A sponsored call no longer goes over the time to dismiss (`1010/231`)
+  because of the sponsor's DUST spend. The ledger sizes the guaranteed section
+  of a call for a fee intent with one DUST spend.
+- `call_contract` on a circuit that spends a shielded coin the contract holds
+  and writes the change back is no longer refused with `1010/104`.
+
 ## [0.23.0] - 2026-11-11
 
 Needs NIGHTGATE 0.43.1.
