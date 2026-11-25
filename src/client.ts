@@ -99,14 +99,14 @@ export class NightgateClient {
   constructor(private readonly config: NightgateMcpConfig) {}
 
   /** GET <service>/<name>(p1=...,p2=...) with only the provided parameters. */
-  async callFunction(name: string, params: Record<string, FunctionParam>): Promise<unknown> {
-    return this.request('GET', `${this.config.baseUrl}${this.config.servicePath}/${functionCall(name, params)}`);
+  async callFunction<T = unknown>(name: string, params: Record<string, FunctionParam>): Promise<T> {
+    return this.request<T>('GET', `${this.config.baseUrl}${this.config.servicePath}/${functionCall(name, params)}`);
   }
 
   /** GET <verify service>/<name>(...): the state reads. The public verify service gets no credentials and costs nothing. */
-  async callVerifyFunction(name: string, params: Record<string, FunctionParam>): Promise<unknown> {
+  async callVerifyFunction<T = unknown>(name: string, params: Record<string, FunctionParam>): Promise<T> {
     const path = this.config.verifyServicePath;
-    return this.request('GET', `${this.config.baseUrl}${path}/${functionCall(name, params)}`, undefined, path !== this.config.servicePath);
+    return this.request<T>('GET', `${this.config.baseUrl}${path}/${functionCall(name, params)}`, undefined, path !== this.config.servicePath);
   }
 
   /** GET <base>/me: units, validity and usage of a gateway key. */
@@ -115,19 +115,19 @@ export class NightgateClient {
   }
 
   /** GET <indexer service>/<name>(...): the read-only status functions, anonymous on the server. */
-  async callIndexerFunction(name: string, params: Record<string, FunctionParam> = {}): Promise<unknown> {
-    return this.request('GET', `${this.config.baseUrl}${this.config.indexerServicePath}/${functionCall(name, params)}`);
+  async callIndexerFunction<T = unknown>(name: string, params: Record<string, FunctionParam> = {}): Promise<T> {
+    return this.request<T>('GET', `${this.config.baseUrl}${this.config.indexerServicePath}/${functionCall(name, params)}`);
   }
 
   /** POST <service>/<name> with the provided parameters as JSON body. */
-  async callAction(name: string, params: Record<string, unknown>): Promise<unknown> {
+  async callAction<T = unknown>(name: string, params: Record<string, unknown>): Promise<T> {
     const body: Record<string, unknown> = {};
     for (const [key, value] of Object.entries(params)) {
       if (value === undefined) continue;
       body[key] = value;
     }
     const url = `${this.config.baseUrl}${this.config.servicePath}/${name}`;
-    return this.request('POST', url, body);
+    return this.request<T>('POST', url, body);
   }
 
   // ---- ODATANO ASTRA: analytics over the same index, same host, same key ----
@@ -186,7 +186,7 @@ export class NightgateClient {
     return headers;
   }
 
-  private async request(method: 'GET' | 'POST', url: string, body?: unknown, anonymous = false): Promise<unknown> {
+  private async request<T = unknown>(method: 'GET' | 'POST', url: string, body?: unknown, anonymous = false): Promise<T> {
     const headers: Record<string, string> = anonymous ? { Accept: 'application/json' } : this.authHeaders();
     if (body !== undefined) headers['Content-Type'] = 'application/json';
 
@@ -208,7 +208,7 @@ export class NightgateClient {
     if (!response.ok) {
       throw apiError(response.status, payload, response.headers, `NIGHTGATE request failed with HTTP ${response.status}`);
     }
-    return stripODataNoise(payload);
+    return stripODataNoise(payload) as T;
   }
 }
 

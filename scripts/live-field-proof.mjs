@@ -53,7 +53,7 @@ const doc = { invoiceId: 'INV-' + randomBytes(4).toString('hex'), total: AMOUNT,
 const prep = await call('prepare_document_proof', {
     document: doc,
     proofFields: [{ field: 'total', scale: SCALE }, { field: 'currency', kind: 'bytes' }],
-    compiledArtifactRef: ARTIFACT,
+    contractName: ARTIFACT,
 });
 const fields = parse(prep.fields);
 const total = fields.find((f) => f.field === 'total') || fail('prepare returned no total field');
@@ -65,7 +65,7 @@ console.log(`attester ${me.attesterId.slice(0, 16)}… (local seed, never sent)`
 async function submit(label, call_, params, extra = {}) {
     const t0 = Date.now();
     const job = await call('submit_vault_call', {
-        contractAddress: VAULT, call: call_, params, compiledArtifactRef: ARTIFACT, ...extra,
+        contractAddress: VAULT, call: call_, params, contractName: ARTIFACT, ...extra,
     });
     if (job.status !== 'succeeded') fail(`${label} job ${job.status}: ${job.errorMessage ?? ''} ${job.next ?? ''}`);
     console.log(`  ${label}: built here and sponsored in ${((Date.now() - t0) / 1000).toFixed(1)}s, tx ${String(job.txHash ?? '').slice(0, 18)}…`);
@@ -88,7 +88,7 @@ for (let i = 0; ; i++) {
     const v = await call('verify_predicate', {
         contractAddress: VAULT, attesterId: me.attesterId, payloadHash: prep.payloadHash, fieldKey: total.fieldKey,
         predicate: 'greaterOrEqual', threshold: Math.round(THRESHOLD * SCALE),
-        compiledArtifactRef: ARTIFACT,
+        contractName: ARTIFACT,
     }).catch(() => null);
     if (v?.verified === true) {
         console.log(`\nVERIFIED on chain: total >= ${THRESHOLD} EUR is proven, the amount (${AMOUNT}) never left this process.`);

@@ -42,7 +42,7 @@ for (const required of ['verify_attestation', 'build_sponsorable_transaction', '
 // The width-32 surface must be visible to a CLIENT, not just to our tests:
 // an agent picks its arguments from the advertised schema alone.
 const build = byName.get('build_sponsorable_transaction');
-const refs = build?.inputSchema?.properties?.compiledArtifactRef?.enum ?? [];
+const refs = build?.inputSchema?.properties?.contractName?.enum ?? [];
 if (!refs.includes('attestation-vault-32')) {
   fail(`build_sponsorable_transaction does not advertise attestation-vault-32 (got ${JSON.stringify(refs)})`);
 }
@@ -56,7 +56,7 @@ if (VAULT && process.env.ODATANO_ACCESS_URL) {
     arguments: {
       contractAddress: VAULT,
       payloadHash: '0'.repeat(64),
-      compiledArtifactRef: process.env.NIGHTGATE_VAULT_ARTIFACT || 'attestation-vault',
+      contractName: process.env.NIGHTGATE_VAULT_ARTIFACT || 'attestation-vault',
     },
   }, undefined, { timeout: 120_000 });
   const text = r.content?.[0]?.text ?? '';

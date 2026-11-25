@@ -99,13 +99,13 @@ console.log('OK: verify_attestation needs attesterId + payloadHash or a document
 // One-call writes check their arguments before anything is built.
 const call = (name, args) => client.callTool({ name, arguments: args })
   .catch((err) => ({ isError: true, content: [{ type: 'text', text: String(err) }] }));
-const rootOnly = await call('anchor_document', { sha256: 'f'.repeat(64), contentRoot: 'a'.repeat(64) });
+const rootOnly = await call('anchor_document', { payloadHash: 'f'.repeat(64), contentRoot: 'a'.repeat(64) });
 if (!rootOnly.isError || !/contentRoot and schemaId together/.test(JSON.stringify(rootOnly.content))) fail('anchor_document accepted contentRoot without schemaId');
 const unknownCall = await call('submit_vault_call', { call: 'issueFieldPredicateAttestation', params: {} });
 if (!unknownCall.isError) fail('submit_vault_call accepted a call that is not a vault circuit');
-const badVault = await call('anchor_document', { sha256: 'f'.repeat(64), contractAddress: 'x' });
+const badVault = await call('anchor_document', { payloadHash: 'f'.repeat(64), contractAddress: 'x' });
 if (!badVault.isError) fail('anchor_document accepted a contract address that is not 64 hex');
-const smallVault = await call('anchor_document', { sha256: 'f'.repeat(64), compiledArtifactRef: 'attestation-vault' });
+const smallVault = await call('anchor_document', { payloadHash: 'f'.repeat(64), contractName: 'attestation-vault' });
 if (!smallVault.isError || !/sandbox vaults are attestation-vault-32/.test(JSON.stringify(smallVault.content))) fail('a 16-slot anchor without an address fell back to the 32-slot sandbox');
 console.log('OK: anchor_document and submit_vault_call validate before building');
 

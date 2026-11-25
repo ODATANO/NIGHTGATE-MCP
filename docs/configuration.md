@@ -45,7 +45,7 @@ sponsored call.
 
 ## Compatibility
 
-NIGHTGATE >= 0.43.1 on a ledger 9 network; a network before its fork stays on
+NIGHTGATE >= 0.47.0 on a ledger 9 network; a network before its fork stays on
 MCP 0.21.0. `send_token` to an unshielded address needs `sponsorTransfer` and
 `allowUnshieldedOffers` on the grant. `call_contract` needs the lineage package next to the server, a
 `$night` pay-in needs `allowUnshieldedOffers` on the grant.

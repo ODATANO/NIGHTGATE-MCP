@@ -86,9 +86,17 @@ let jobStatus = 'running';
 const OFFER_ID = '99999999-8888-4777-8666-555555555555';
 let boardStatus = 'open';
 const boardRow = () => ({ offerId: OFFER_ID, status: boardStatus, tags: ['otc'] });
+/** The parameters of a function call in a URL, `name(a='x',b=1)`, as an object of texts. */
+const urlParams = (url) => {
+  const inside = /\(([^)]*)\)$/.exec(String(url).split('/').pop())?.[1] ?? '';
+  return Object.fromEntries(inside.split(',').filter(Boolean).map((part) => {
+    const [key, value] = part.split('=');
+    return [key, decodeURIComponent(value).replace(/^'|'$/g, '')];
+  }));
+};
 globalThis.fetch = async (url, init) => {
   const name = String(url).split('/').pop().split('(')[0];
-  const body = init?.body ? JSON.parse(init.body) : undefined;
+  const body = init?.body ? JSON.parse(init.body) : urlParams(url);
   calls.posts.push({ name, body });
   const json = (status, payload) => new Response(JSON.stringify(payload), { status, headers: { 'content-type': 'application/json' } });
   if (name === 'sponsorSwap') {

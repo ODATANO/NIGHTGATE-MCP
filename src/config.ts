@@ -175,10 +175,10 @@ export const SANDBOX_VAULTS: Readonly<Record<string, string>> = {
 };
 
 /** The vault a call targets: the given address, else NIGHTGATE_SANDBOX_VAULT, else the sandbox vault of the network. */
-export function vaultOf(config: NightgateMcpConfig, contractAddress?: string, compiledArtifactRef?: string): string {
+export function vaultOf(config: NightgateMcpConfig, contractAddress?: string, contractName?: string): string {
   if (contractAddress) return contractAddress.toLowerCase();
-  if (compiledArtifactRef && compiledArtifactRef !== 'attestation-vault-32') {
-    throw new Error(`the sandbox vaults are attestation-vault-32: pass contractAddress for a '${compiledArtifactRef}' vault`);
+  if (contractName && contractName !== 'attestation-vault-32') {
+    throw new Error(`the sandbox vaults are attestation-vault-32: pass contractAddress for a '${contractName}' vault`);
   }
   const sandbox = config.sandboxVault ?? SANDBOX_VAULTS[config.network];
   if (!sandbox) throw new Error(`contractAddress is required on ${config.network}: there is no sandbox vault there (or set NIGHTGATE_SANDBOX_VAULT)`);

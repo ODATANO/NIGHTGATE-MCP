@@ -5,7 +5,39 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 The README says which NIGHTGATE the current version needs.
 
-## [Unreleased]
+## [0.24.0] - 2026-11-24
+
+Needs NIGHTGATE 0.47.0 and `@odatano/nightgate-tx` 0.25.3.
+
+### Breaking
+
+- Talks to NIGHTGATE 0.47.0 only: the sponsor actions are `sponsorUnbound` and
+  `sponsorFinalized`, the state checks `verifyAttestation` and `verifyPredicate`,
+  and `getJobStatus` is read as a function. A server before 0.47.0 answers 404.
+- A write answers `txId` and `txHash`, where it answered `txHash` and
+  `transactionHash`. `txHash` is the ledger hash explorers show.
+- `post_swap_offer` no longer takes `directed`, and `take_swap_offer` and
+  `sponsor_swap` no longer take `takerSecret`. The board lists offers anyone
+  can take; for a deal with one partner hand the offer file to that partner.
+- `derive_token_type` requires `domainSeparator`.
+- The tool parameter `compiledArtifactRef` is `contractName`, the name the
+  server uses, in `verify_attestation`, `verify_predicate`,
+  `prepare_document_proof`, `prepare_membership_set`, `anchor_document`,
+  `submit_vault_call` and `build_sponsorable_transaction`.
+- The vault calls `registerPassport` and `bindPassport` are `registerDocument`
+  and `bindDocument`, the circuit names, and take `documentId` in place of
+  `passportId`.
+- `anchor_document` takes the document hash as `payloadHash`, not `sha256`.
+- Board rows carry no offer half. `get_swap_offer` returns it.
+
+### Changed
+
+- `verify_predicate` sends `threshold` as a decimal string, up to 2^64-1.
+- The private state a package's witnesses leave after a `call_contract` is
+  the one the builder returns.
+- Answers are typed with the answer types of `@odatano/nightgate-tx`.
+- A locally built call waits up to 120 s for the server's contract state
+  while its indexer has not reached the newest action, where it waited 30 s.
 
 ## [0.23.1] - 2026-11-18
 

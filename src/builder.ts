@@ -8,6 +8,8 @@ import { txExport } from './tx-module.js';
 import { holdBuilt, writeTxFile, type TxBytesInfo } from './built.js';
 import { ensureSeed } from './seed.js';
 import { setStage } from './jobs.js';
+import type * as TxBuilderModule from '@odatano/nightgate-tx/txbuilder';
+import type * as CallsModule from '@odatano/nightgate-tx/calls';
 
 /**
  * Call kinds this tool can prepare, one per attestation-vault helper. A prove* call keeps the private inputs
@@ -18,8 +20,8 @@ export const BUILDABLE_CALLS = [
   'anchorContentRoot',
   'grantDisclosure',
   'revokeDisclosure',
-  'registerPassport',
-  'bindPassport',
+  'registerDocument',
+  'bindDocument',
   'proveFieldPredicate',
   'proveFieldEquality',
   'proveFieldMembership',
@@ -41,7 +43,7 @@ export interface BuildInput {
   call: BuildableCall;
   params: Record<string, string | number>;
   bind: boolean;
-  compiledArtifactRef?: BuildableArtifact;
+  contractName?: BuildableArtifact;
   /**
    * WITNESS material for the prove* calls, exactly as prepare_document_proof
    * returns it per field. Never persisted, never sent to the server: it is
@@ -69,8 +71,8 @@ export interface BuildOutput extends TxBytesInfo {
 
 interface TxModules {
   createTxBuilder: (opts: any) => Promise<any>;
-  computeRecordKey: (attesterId: string, payloadHash: string) => string;
-  calls: Record<string, (input: Record<string, unknown>) => unknown>;
+  computeRecordKey: typeof TxBuilderModule.computeRecordKey;
+  calls: typeof CallsModule;
   Contract: unknown;
 }
 
@@ -91,14 +93,14 @@ async function loadModules(ref: BuildableArtifact = DEFAULT_ARTIFACT): Promise<T
         ]);
         return {
           createTxBuilder: tx.createTxBuilder as any,
-          computeRecordKey: (tx as any).computeRecordKey,
-          calls: calls as any,
+          computeRecordKey: tx.computeRecordKey,
+          calls,
           Contract: (vault as any).Contract,
         };
       } catch (err) {
         modules.delete(ref);
         throw new Error(
-          `local building of '${ref}' needs @odatano/nightgate-tx >= 0.12.2 next to the MCP server ` +
+          `local building of '${ref}' needs @odatano/nightgate-tx >= 0.25.3 next to the MCP server ` +
           '(npm install @odatano/nightgate-tx): ' + (err instanceof Error ? err.message : String(err)),
         );
       }
@@ -153,22 +155,21 @@ function hexParam(params: Record<string, string | number>, key: string): string 
 }
 
 /**
- * Map the tool's flat params onto the typed prepare* helper of the call kind.
- * The proof helpers take the RECORD KEY of the document they prove against:
+ * Map the tool's flat params onto the typed prepare* helper of the call kind. A proof helper takes the RECORD KEY:
  * `recordKey` as given, else recordKey(attesterId ?? this builder, payloadHash).
  */
-function prepareCall(mods: TxModules, input: BuildInput, attestationSecret: Uint8Array, ownAttesterId: string): unknown {
+async function prepareCall(mods: TxModules, input: BuildInput, attestationSecret: Uint8Array, ownAttesterId: string): Promise<unknown> {
   const { calls } = mods;
   const p = input.params;
-  const slotWidth = (input.compiledArtifactRef ?? DEFAULT_ARTIFACT) === 'attestation-vault-32' ? 32 : 16;
-  const recordKeyOf = (keyName: string, payloadName: string, attesterName: string): string => {
+  const slotWidth = (input.contractName ?? DEFAULT_ARTIFACT) === 'attestation-vault-32' ? 32 : 16;
+  const recordKeyOf = async (keyName: string, payloadName: string, attesterName: string): Promise<string> => {
     if (typeof p[keyName] === 'string') return hexParam(p, keyName);
     const attester = typeof p[attesterName] === 'string' ? hexParam(p, attesterName) : ownAttesterId;
     return mods.computeRecordKey(attester, hexParam(p, payloadName));
   };
   const recordKey = () => recordKeyOf('recordKey', 'payloadHash', 'attesterId');
   const recordKeyA = () => recordKeyOf('recordKeyA', 'payloadHashA', 'attesterIdA');
-  const recordKeyB = () => {
+  const recordKeyB = async (): Promise<string> => {
     if (typeof p.recordKeyB === 'string') return hexParam(p, 'recordKeyB');
     const attester = typeof p.attesterIdB === 'string' ? hexParam(p, 'attesterIdB')
       : typeof p.attesterIdA === 'string' ? hexParam(p, 'attesterIdA') : ownAttesterId;
@@ -187,31 +188,31 @@ function prepareCall(mods: TxModules, input: BuildInput, attestationSecret: Uint
       const op = Number(p.op);
       if (![0, 1].includes(op)) throw new Error('params.op must be 0 (lessOrEqual) or 1 (greaterOrEqual)');
       return calls.prepareProveFieldPredicate({
-        recordKey: recordKey(), fieldKey: hexParam(p, 'fieldKey'),
+        recordKey: await recordKey(), fieldKey: hexParam(p, 'fieldKey'),
         threshold: BigInt(p.threshold as string | number), op: BigInt(op),
         merkleProof: witness('fieldValue, fieldSalt, siblings, dirs'), attestationSecret, slotWidth,
       } as any);
     }
     case 'proveFieldEquality':
       return calls.prepareProveFieldEquality({
-        recordKey: recordKey(), fieldKey: hexParam(p, 'fieldKey'),
+        recordKey: await recordKey(), fieldKey: hexParam(p, 'fieldKey'),
         expectedDigest: hexParam(p, 'expectedDigest'),
         merkleProof: witness('fieldSalt, siblings, dirs'), attestationSecret, slotWidth,
       } as any);
     case 'proveFieldMembership':
       return calls.prepareProveFieldMembership({
-        recordKey: recordKey(), fieldKey: hexParam(p, 'fieldKey'),
+        recordKey: await recordKey(), fieldKey: hexParam(p, 'fieldKey'),
         setRoot: hexParam(p, 'setRoot'),
         merkleProof: witness('fieldDigest, fieldSalt, siblings, dirs, setProof'), attestationSecret, slotWidth,
       } as any);
     case 'proveFieldsUnchangedExcept':
       return calls.prepareProveFieldsUnchangedExcept({
-        recordKeyA: recordKeyA(), recordKeyB: recordKeyB(),
+        recordKeyA: await recordKeyA(), recordKeyB: await recordKeyB(),
         allowedMask: Number(p.allowedMask), docPair: pair(), attestationSecret, slotWidth,
       } as any);
     case 'proveFieldsDiffer':
       return calls.prepareProveFieldsDiffer({
-        recordKeyA: recordKeyA(), recordKeyB: recordKeyB(),
+        recordKeyA: await recordKeyA(), recordKeyB: await recordKeyB(),
         k: Number(p.k), docPair: pair(), attestationSecret, slotWidth,
       } as any);
     case 'attest':
@@ -225,23 +226,23 @@ function prepareCall(mods: TxModules, input: BuildInput, attestationSecret: Uint
     }
     case 'revokeDisclosure':
       return calls.prepareRevokeDisclosure({ payloadHash: hexParam(p, 'payloadHash'), grantee: hexParam(p, 'grantee'), attestationSecret });
-    case 'registerPassport':
-      return calls.prepareRegisterPassport({ passportId: hexParam(p, 'passportId'), ownerId: hexParam(p, 'ownerId'), attestationSecret });
-    case 'bindPassport':
-      return calls.prepareBindPassport({ passportId: hexParam(p, 'passportId'), payloadHash: hexParam(p, 'payloadHash'), attestationSecret });
+    case 'registerDocument':
+      return calls.prepareRegisterDocument({ documentId: hexParam(p, 'documentId'), ownerId: hexParam(p, 'ownerId'), attestationSecret });
+    case 'bindDocument':
+      return calls.prepareBindDocument({ documentId: hexParam(p, 'documentId'), payloadHash: hexParam(p, 'payloadHash'), attestationSecret });
   }
 }
 
 /** Build + prove + sign locally; unbound (parallel channel) by default. */
 export async function buildSponsorable(config: NightgateMcpConfig, input: BuildInput): Promise<BuildOutput> {
   const t0 = Date.now();
-  const ref = input.compiledArtifactRef ?? DEFAULT_ARTIFACT;
+  const ref = input.contractName ?? DEFAULT_ARTIFACT;
   setStage('preparing the builder and prover keys');
   const b = await getBuilder(config, ref);
   const mods = await loadModules(ref);
   const t1 = Date.now();
   setStage('proving');
-  const call = prepareCall(mods, input, b.attestationSecret, String(b.attesterId));
+  const call = await prepareCall(mods, input, b.attestationSecret, String(b.attesterId));
   const built = await b.buildSponsorable({ contractAddress: input.contractAddress, call, bind: input.bind ? true : false });
   const b64 = String(input.bind ? built.finalizedTxB64 : built.unboundTxB64);
   if (input.outFile) await writeTxFile(input.outFile, b64);

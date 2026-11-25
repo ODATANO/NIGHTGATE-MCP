@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import { int64, raw, NightgateApiError, NightgateClient } from './client.js';
+import type { VerifyAttestationAnswer, VerifyPredicateAnswer, PrepareDocumentProofAnswer, PrepareMembershipSetAnswer, DeriveTokenTypeAnswer } from '@odatano/nightgate-tx/client';
+import { raw, NightgateApiError, NightgateClient } from './client.js';
 import { isGatewayKey, vaultOf, type NightgateMcpConfig } from './config.js';
 import { BUILDABLE_CALLS, BUILDABLE_ARTIFACTS, DEFAULT_ARTIFACT, buildSponsorable, attesterIdentity, type BuildInput } from './builder.js';
 import {
@@ -11,9 +12,8 @@ import {
 import { buildBurn, buildMint } from './factory.js';
 import { buildContractCall, nightCallSent } from './contract-call.js';
 import { buildUnshieldedTransfer, unshieldedInfo } from './unshielded.js';
-import { randomBytes } from 'node:crypto';
 import { resolveTxSource } from './built.js';
-import { awaitJob, callStage, chainOutcome, forgetStart, jobSession, markReused, startSponsored, type JobCheck, type ToolExtra } from './jobs.js';
+import { awaitJob, callStage, chainOutcome, forgetStart, jobSession, markReused, readJobStatus, startSponsored, type JobCheck, type ToolExtra } from './jobs.js';
 import { seedCreated, seedNotice } from './seed.js';
 
 const HEX64 = /^[0-9a-fA-F]{64}$/;
@@ -47,8 +47,8 @@ const SWAP_HINT = 'A swap settles two shielded tokens between two wallets withou
   'and a sponsor pays the fee.';
 
 const OFFER_STATUS = z.enum(['open', 'filled', 'retired', 'expired', 'all']);
-const BOARD_ROW_HINT = 'Each row: offerId, the offer half (feed it to read_swap_offer or take_swap_offer), gives/wants ' +
-  'type and amount, tags, expiresAt, postedAt, status, filledTxHash, closedAt, changedAt. Never the poster or the ' +
+const BOARD_ROW_HINT = 'Each row: offerId, bound, gives and wants with type and amount, tags, expiresAt, postedAt, status, ' +
+  'filledTxHash, closedAt, changedAt. The offer half itself comes from get_swap_offer. Never the poster or the ' +
   "half's nullifiers.";
 
 const MAX_SLOT_WIDTH = 32;
@@ -59,7 +59,7 @@ const RETRY_HINT = 'If the call was cut off or came back pending, run it again w
   'A second, separate call with the same arguments needs a new idempotencyKey.';
 const RECEIPT_HINT = 'The tool also waits for the block (about a minute more) and then carries the instance\'s signed ' +
   'receipt; if that wait runs out, receipt is null and the same call again fetches it. ';
-const WAIT_HINT = 'The tool waits until the job settled (about 1 minute) and returns { status, txHash, transactionHash, result }. ' +
+const WAIT_HINT = 'The tool waits until the job settled (about 1 minute) and returns { status, txId, txHash, result }. ' +
   'failed: `next` says what to do. ' + RETRY_HINT;
 const MAX_MASK = 0xffffffff;
 
@@ -73,7 +73,7 @@ function callKey(...parts: unknown[]): string {
 function checkFor(input: Omit<BuildInput, 'bind'>, ownAttesterId: string): JobCheck | undefined {
   const p = input.params;
   const hex = (k: string) => (typeof p[k] === 'string' ? String(p[k]).toLowerCase() : undefined);
-  const base = { contractAddress: input.contractAddress, compiledArtifactRef: input.compiledArtifactRef ?? DEFAULT_ARTIFACT };
+  const base = { contractAddress: input.contractAddress, contractName: input.contractName ?? DEFAULT_ARTIFACT };
   const record = (payloadHash?: string, attesterId?: string) =>
     payloadHash ? { ...base, attesterId: attesterId ?? ownAttesterId, payloadHash } : undefined;
   const claim = (args: Record<string, unknown> | undefined): JobCheck | undefined => (args ? { tool: 'verify_predicate', args } : undefined);
@@ -82,7 +82,7 @@ function checkFor(input: Omit<BuildInput, 'bind'>, ownAttesterId: string): JobCh
     case 'anchorContentRoot':
     case 'grantDisclosure':
     case 'revokeDisclosure':
-    case 'bindPassport': {
+    case 'bindDocument': {
       const r = record(hex('payloadHash'));
       if (!r) return undefined;
       const root = input.call === 'anchorContentRoot' ? { contentRoot: hex('contentRoot'), schemaId: hex('schemaId') } : {};
@@ -126,8 +126,9 @@ export function registerTools(server: McpServer, client: NightgateClient, config
   const settleOpenJobs = async (): Promise<void> => {
     if (!config) return;
     for (const jobId of new Set([...halfJobIds(), ...callSettlers.keys()])) {
-      const job = await client.callAction('getJobStatus', { jobId, sessionId: jobSession(jobId) }).catch(() => undefined) as Record<string, unknown> | undefined;
-      if (!job) continue;
+      const status = await readJobStatus(client, jobId, jobSession(jobId)).catch(() => undefined);
+      if (!status) continue;
+      const job: Record<string, unknown> = { ...status };
       await settleHalfJob(config, jobId, job);
       await settleCall(jobId, job);
     }
@@ -145,8 +146,8 @@ export function registerTools(server: McpServer, client: NightgateClient, config
     if (config) void releaseLapsedHalves(config).catch(() => { /* logged where it failed */ });
     return rows;
   };
-  const vault = (contractAddress?: string, compiledArtifactRef?: string): string => {
-    if (config) return vaultOf(config, contractAddress, compiledArtifactRef);
+  const vault = (contractAddress?: string, contractName?: string): string => {
+    if (config) return vaultOf(config, contractAddress, contractName);
     if (!contractAddress) throw new Error('contractAddress is required');
     return contractAddress.toLowerCase();
   };
@@ -191,21 +192,21 @@ export function registerTools(server: McpServer, client: NightgateClient, config
           .describe('Optional anchored schema id to check; the result reports schemaOk, so an examiner can pin the canonical field list'),
         network: z.enum(['preview', 'preprod', 'mainnet']).optional()
           .describe('Read from another network public indexer instead of the configured one'),
-        compiledArtifactRef: z.string().optional().describe("Contract artifact ref, defaults to 'attestation-vault-32'; 'attestation-vault' for a 16-slot vault"),
+        contractName: z.string().optional().describe("Contract artifact ref, defaults to 'attestation-vault-32'; 'attestation-vault' for a 16-slot vault"),
       },
     },
     run(async (args) => {
       if (!args.documentId && !(args.attesterId && args.payloadHash)) {
         throw new Error('name the record: attesterId + payloadHash, or documentId');
       }
-      return client.callVerifyFunction('verifyAttestationState', {
-        contractAddress: vault(args.contractAddress, args.compiledArtifactRef),
+      return client.callVerifyFunction<VerifyAttestationAnswer>('verifyAttestation', {
+        contractAddress: vault(args.contractAddress, args.contractName),
         attesterId: args.attesterId,
         payloadHash: args.payloadHash,
         documentId: args.documentId,
         contentRoot: args.contentRoot,
         schemaId: args.schemaId,
-        compiledArtifactRef: args.compiledArtifactRef ?? DEFAULT_ARTIFACT,
+        contractName: args.contractName ?? DEFAULT_ARTIFACT,
         network: args.network,
       });
     }),
@@ -247,7 +248,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
           .describe('documentDiff only: the k that was proven'),
         network: z.enum(['preview', 'preprod', 'mainnet']).optional()
           .describe('Read from another network public indexer instead of the configured one'),
-        compiledArtifactRef: z.string().optional().describe("Contract artifact ref, defaults to 'attestation-vault-32'; 'attestation-vault' for a 16-slot vault"),
+        contractName: z.string().optional().describe("Contract artifact ref, defaults to 'attestation-vault-32'; 'attestation-vault' for a 16-slot vault"),
       },
     },
     run(async (args) => {
@@ -266,20 +267,20 @@ export function registerTools(server: McpServer, client: NightgateClient, config
       if (args.predicate === 'documentDiff' && (!args.payloadHashB || args.k === undefined)) {
         throw new Error("predicate 'documentDiff' requires payloadHashB and k");
       }
-      return client.callVerifyFunction('verifyPredicateState', {
-        contractAddress: vault(args.contractAddress, args.compiledArtifactRef),
+      return client.callVerifyFunction<VerifyPredicateAnswer>('verifyPredicate', {
+        contractAddress: vault(args.contractAddress, args.contractName),
         attesterId: args.attesterId,
         payloadHash: args.payloadHash,
         attesterIdB: args.attesterIdB,
         fieldKey: args.fieldKey,
         predicate: args.predicate,
-        threshold: args.threshold === undefined ? undefined : int64(args.threshold),
+        threshold: args.threshold === undefined ? undefined : String(args.threshold),
         expectedDigest: args.expectedDigest,
         setRoot: args.setRoot,
         payloadHashB: args.payloadHashB,
         allowedMask: args.allowedMask,
         k: args.k,
-        compiledArtifactRef: args.compiledArtifactRef ?? DEFAULT_ARTIFACT,
+        contractName: args.contractName ?? DEFAULT_ARTIFACT,
         network: args.network,
       });
     }),
@@ -314,18 +315,18 @@ export function registerTools(server: McpServer, client: NightgateClient, config
             .describe("Leaf kind: 'uint' (default, numeric scaled value) or 'bytes' (string value entered as digest of the exact string)"),
           scale: z.number().int().min(1).max(1_000_000_000).optional()
             .describe("Value scale (default 1000: milli-units); only valid for kind 'uint'"),
-        })).min(1).max(MAX_SLOT_WIDTH).describe('ORDERED list of fields to make provable (leaf index = position). Up to 32 on the default attestation-vault-32, up to 16 with compiledArtifactRef attestation-vault'),
+        })).min(1).max(MAX_SLOT_WIDTH).describe('ORDERED list of fields to make provable (leaf index = position). Up to 32 on the default attestation-vault-32, up to 16 with contractName attestation-vault'),
         saltSeed: hex64('saltSeed').optional()
           .describe('Reuse a stored salt seed to reproduce an already-anchored root; omit for a fresh document (random seed)'),
-        compiledArtifactRef: z.string().optional().describe("Contract artifact ref, defaults to 'attestation-vault-32'; 'attestation-vault' for a 16-slot vault"),
+        contractName: z.string().optional().describe("Contract artifact ref, defaults to 'attestation-vault-32'; 'attestation-vault' for a 16-slot vault"),
       },
     },
     run(async (args) =>
-      client.callAction('prepareDocumentProof', {
+      client.callAction<PrepareDocumentProofAnswer>('prepareDocumentProof', {
         document: args.document,
         proofFields: args.proofFields,
         saltSeed: args.saltSeed,
-        compiledArtifactRef: args.compiledArtifactRef ?? DEFAULT_ARTIFACT,
+        contractName: args.contractName ?? DEFAULT_ARTIFACT,
       })),
   );
 
@@ -346,18 +347,18 @@ export function registerTools(server: McpServer, client: NightgateClient, config
           .describe('Optional member string to get the inclusion path for (pass this OR valueDigest)'),
         valueDigest: hex64('valueDigest').optional()
           .describe('Optional member digest (64 hex) instead of the raw value'),
-        compiledArtifactRef: z.string().optional().describe("Contract artifact ref, defaults to 'attestation-vault-32'; 'attestation-vault' for a 16-slot vault"),
+        contractName: z.string().optional().describe("Contract artifact ref, defaults to 'attestation-vault-32'; 'attestation-vault' for a 16-slot vault"),
       },
     },
     run(async (args) => {
       if (args.value !== undefined && args.valueDigest !== undefined) {
         throw new Error('pass at most one of value / valueDigest');
       }
-      return client.callAction('prepareMembershipSet', {
+      return client.callAction<PrepareMembershipSetAnswer>('prepareMembershipSet', {
         allowedValues: args.allowedValues,
         value: args.value,
         valueDigest: args.valueDigest,
-        compiledArtifactRef: args.compiledArtifactRef ?? DEFAULT_ARTIFACT,
+        contractName: args.contractName ?? DEFAULT_ARTIFACT,
       });
     }),
   );
@@ -382,12 +383,12 @@ export function registerTools(server: McpServer, client: NightgateClient, config
   /** Build one vault call here, hand it to the sponsor and wait until it settled. */
   const submitVaultCall = async (input: Omit<BuildInput, 'bind'>, idempotencyKey: string | undefined, extra: ToolExtra): Promise<Record<string, unknown>> => {
     if (!config) throw new Error('local building is not configured for this server instance');
-    const key = callKey('vault', input.contractAddress, input.compiledArtifactRef ?? DEFAULT_ARTIFACT, input.call, input.params, input.merkleProof, input.docPair, idempotencyKey ?? null);
+    const key = callKey('vault', input.contractAddress, input.contractName ?? DEFAULT_ARTIFACT, input.call, input.params, input.merkleProof, input.docPair, idempotencyKey ?? null);
     const started = await startSponsored(client, key, idempotencyKey, async (k) => {
       const built = await buildSponsorable(config, { ...input, bind: false });
       const { b64 } = await resolveTxSource({ txId: built.txId }, 'unboundTxB64');
       return {
-        action: 'sponsorUnboundTransaction',
+        action: 'sponsorUnbound',
         body: { unboundTxB64: b64, idempotencyKey: k },
         info: { attesterId: built.attesterId, contractAddress: input.contractAddress, buildMs: built.buildMs, timings: { setupMs: built.setupMs, proveMs: built.proveMs } },
       };
@@ -401,35 +402,35 @@ export function registerTools(server: McpServer, client: NightgateClient, config
     'anchor_document',
     {
       description:
-        'Anchor a document hash on Midnight in one call: builds the attest transaction here with ' +
+        'Anchor a document hash (payloadHash) on Midnight in one call: builds the attest transaction here with ' +
         'the caller seed, a sponsor pays the fee, and the tool waits until it landed (about 1 to 2 ' +
         'minutes; the first call also downloads the prover keys). The record belongs to this ' +
         'seed (attesterId). Only the hash and the hash of the metadata go on-chain; keep the ' +
         'document yourself. With contentRoot and schemaId from prepare_document_proof it also ' +
         'anchors the content root, which the field claims of submit_vault_call need. Returns ' +
-        '{ status, attesterId, payloadHash, contractAddress, metadataJson, txHash, transactionHash, ' +
+        '{ status, attesterId, payloadHash, contractAddress, metadataJson, txId, txHash, ' +
         'timings, check }; check is the verify_attestation call that shows the record on-chain. ' + RETRY_HINT,
       inputSchema: {
-        sha256: hex64('sha256').describe('sha256 of the document (64 hex); it becomes the payloadHash'),
+        payloadHash: hex64('payloadHash').describe('Hash of the document (64 hex), usually its sha256'),
         metadata: z.record(z.string(), z.unknown()).optional()
           .describe('Public metadata; its sha256 is anchored with the hash. Default none'),
         contentRoot: hex64('contentRoot').optional().describe('Content root from prepare_document_proof (64 hex); needs schemaId'),
         schemaId: hex64('schemaId').optional().describe('Schema id from prepare_document_proof (64 hex); needs contentRoot'),
         contractAddress: CONTRACT,
-        compiledArtifactRef: z.enum(BUILDABLE_ARTIFACTS).optional()
+        contractName: z.enum(BUILDABLE_ARTIFACTS).optional()
           .describe("Vault lineage, default 'attestation-vault-32' (the sandbox vaults); 'attestation-vault' for a 16-slot vault"),
         idempotencyKey: z.string().optional().describe('Dedupes retries of the same anchor'),
       },
     },
     run(async (args, extra) => {
       if (!!args.contentRoot !== !!args.schemaId) throw new Error('pass contentRoot and schemaId together');
-      const contractAddress = vault(args.contractAddress, args.compiledArtifactRef);
-      const payloadHash = args.sha256.toLowerCase();
+      const contractAddress = vault(args.contractAddress, args.contractName);
+      const payloadHash = args.payloadHash.toLowerCase();
       const metadataJson = args.metadata === undefined ? '' : JSON.stringify(args.metadata);
       const metadataHash = createHash('sha256').update(metadataJson, 'utf8').digest('hex');
-      const ref = args.compiledArtifactRef ?? DEFAULT_ARTIFACT;
+      const ref = args.contractName ?? DEFAULT_ARTIFACT;
       const anchor = await submitVaultCall(
-        { contractAddress, call: 'attest', params: { payloadHash, metadataHash }, compiledArtifactRef: ref },
+        { contractAddress, call: 'attest', params: { payloadHash, metadataHash }, contractName: ref },
         args.idempotencyKey, extra);
       if (!args.contentRoot || !args.schemaId) return { ...anchor, payloadHash, metadataJson };
       if (anchor.status !== 'succeeded') {
@@ -439,7 +440,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         return { ...anchor, payloadHash, metadataJson, contentRoot: { status: 'not anchored', next: rootNext } };
       }
       const root = await submitVaultCall(
-        { contractAddress, call: 'anchorContentRoot', params: { payloadHash, contentRoot: args.contentRoot, schemaId: args.schemaId }, compiledArtifactRef: ref },
+        { contractAddress, call: 'anchorContentRoot', params: { payloadHash, contentRoot: args.contentRoot, schemaId: args.schemaId }, contractName: ref },
         args.idempotencyKey && `${args.idempotencyKey}:root`, extra);
       return { ...root, payloadHash, metadataJson, anchorTxHash: anchor.txHash, anchorTimings: anchor.timings };
     }),
@@ -454,9 +455,9 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         'build_sponsorable_transaction: the ZK claims over a hidden field (proveFieldPredicate, ' +
         'proveFieldEquality, proveFieldMembership), the claims across two documents ' +
         '(proveFieldsUnchangedExcept, proveFieldsDiffer), disclosure (grantDisclosure, ' +
-        'revokeDisclosure), passports and anchoring. The witness from prepare_document_proof is ' +
-        'used here and never sent. Returns { status, attesterId, contractAddress, txHash, ' +
-        'transactionHash, timings, check }; check is the free verify call that shows the effect on-chain. ' +
+        'revokeDisclosure), document ids and anchoring. The witness from prepare_document_proof is ' +
+        'used here and never sent. Returns { status, attesterId, contractAddress, txId, ' +
+        'txHash, timings, check }; check is the free verify call that shows the effect on-chain. ' +
         'A failed job says in `next` what to do. ' + RETRY_HINT,
       inputSchema: {
         contractAddress: CONTRACT,
@@ -467,14 +468,14 @@ export function registerTools(server: McpServer, client: NightgateClient, config
           .describe('WITNESS for the proveField* calls, as prepare_document_proof returns it for that field'),
         docPair: z.record(z.string(), z.any()).optional()
           .describe('WITNESS { schema, openingA, openingB } for proveFieldsUnchangedExcept and proveFieldsDiffer'),
-        compiledArtifactRef: z.enum(BUILDABLE_ARTIFACTS).optional()
+        contractName: z.enum(BUILDABLE_ARTIFACTS).optional()
           .describe("Vault lineage, default 'attestation-vault-32' (the sandbox vaults); 'attestation-vault' for a 16-slot vault"),
         idempotencyKey: z.string().optional().describe('Dedupes retries of the same call'),
       },
     },
     run(async (args, extra) => submitVaultCall({
-      contractAddress: vault(args.contractAddress, args.compiledArtifactRef), call: args.call, params: args.params,
-      merkleProof: args.merkleProof, docPair: args.docPair, compiledArtifactRef: args.compiledArtifactRef ?? DEFAULT_ARTIFACT,
+      contractAddress: vault(args.contractAddress, args.contractName), call: args.call, params: args.params,
+      merkleProof: args.merkleProof, docPair: args.docPair, contractName: args.contractName ?? DEFAULT_ARTIFACT,
     }, args.idempotencyKey, extra)),
   );
 
@@ -493,8 +494,8 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         'fetches the prover keys from the NIGHTGATE /zk-config); NIGHTGATE_PROOF_SERVER_URL ' +
         'switches to a proof server. params by call: attest {payloadHash, metadataHash}; anchorContentRoot ' +
         '{payloadHash, contentRoot, schemaId}; grantDisclosure {payloadHash, grantee, level 0|1|2}; ' +
-        'revokeDisclosure {payloadHash, grantee}; registerPassport {passportId, ownerId}; ' +
-        'bindPassport {passportId, payloadHash}. The owner-gated calls address THIS builder\'s own ' +
+        'revokeDisclosure {payloadHash, grantee}; registerDocument {documentId, ownerId}; ' +
+        'bindDocument {documentId, payloadHash}. The owner-gated calls address THIS builder\'s own ' +
         'record of the payload (the circuit derives recordKey(attesterId, payloadHash) from the ' +
         'caller). ZK CLAIMS, proven here with no wallet on the server and no witness ever sent ' +
         'to it, address a record explicitly: pass payloadHash (this builder\'s record) or ' +
@@ -521,7 +522,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
           .describe('WITNESS bundle { schema, openingA, openingB } for proveFieldsUnchangedExcept / proveFieldsDiffer; both documents must be prepared with the same ordered field list'),
         bind: z.boolean().optional()
           .describe('false (default): unbound for sponsor_unbound_transaction; true: finalized for sponsor_finalized_transaction'),
-        compiledArtifactRef: z.enum(BUILDABLE_ARTIFACTS).optional()
+        contractName: z.enum(BUILDABLE_ARTIFACTS).optional()
           .describe("Vault lineage to build against, defaults to 'attestation-vault-32' (the hosted sandbox vaults). Use 'attestation-vault' for a 16-slot vault: it has its own circuits, so the builder loads that contract class and fetches ITS prover keys from the server's /zk-config. The address must belong to the lineage named here"),
         outFile: z.string().min(1).optional()
           .describe('Also write the built bytes as base64 to this path, for a sponsor tool on another server (its file argument)'),
@@ -530,8 +531,8 @@ export function registerTools(server: McpServer, client: NightgateClient, config
     run(async (args) => {
       if (!config) throw new Error('local building is not configured for this server instance');
       return buildSponsorable(config, {
-        contractAddress: vault(args.contractAddress, args.compiledArtifactRef), call: args.call, params: args.params, bind: args.bind === true,
-        compiledArtifactRef: args.compiledArtifactRef ?? DEFAULT_ARTIFACT,
+        contractAddress: vault(args.contractAddress, args.contractName), call: args.call, params: args.params, bind: args.bind === true,
+        contractName: args.contractName ?? DEFAULT_ARTIFACT,
         merkleProof: args.merkleProof, docPair: args.docPair, outFile: args.outFile,
       });
     }),
@@ -578,7 +579,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
     },
     run(async (args, extra) => {
       const { b64, sent } = await resolveTxSource({ txId: args.txId, file: args.file, b64: args.finalizedTxB64 }, 'finalizedTxB64');
-      return { ...await sponsorOnce('sponsorFinalizedTransaction', { finalizedTxB64: b64 }, args.idempotencyKey, extra), sent };
+      return { ...await sponsorOnce('sponsorFinalized', { finalizedTxB64: b64 }, args.idempotencyKey, extra), sent };
     }),
   );
 
@@ -607,7 +608,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
     },
     run(async (args, extra) => {
       const { b64, sent } = await resolveTxSource({ txId: args.txId, file: args.file, b64: args.unboundTxB64 }, 'unboundTxB64');
-      return { ...await sponsorOnce('sponsorUnboundTransaction', { unboundTxB64: b64 }, args.idempotencyKey, extra), sent };
+      return { ...await sponsorOnce('sponsorUnbound', { unboundTxB64: b64 }, args.idempotencyKey, extra), sent };
     }),
   );
 
@@ -691,7 +692,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         'refuses when they differ from `expect`, builds and proves the mirror half from this ' +
         'server\'s wallet (it spends what the offer wants and creates what the offer gives). ' +
         'With submit: true the two halves go to the sponsor at once and the tool waits until ' +
-        'the swap landed ({ status, txHash, transactionHash, result.swap, id, terms }). ' +
+        'the swap landed ({ status, txId, txHash, result.swap, id, terms }). ' +
         'Without it the answer carries both halves for sponsor_swap. ALWAYS pass ' +
         '`expect` with the terms you agreed to: an offer is text from someone else. With offerId ' +
         'the board entry is read first and the call refuses, before proving, when it is not open ' +
@@ -708,8 +709,6 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         idempotencyKey: z.string().optional().describe('Dedupes retries of the same submission'),
         offerId: z.string().uuid().optional()
           .describe('The board entry the offer came from (list_swap_offers), so the fill is recorded against it'),
-        takerSecret: z.string().min(1).max(256).optional()
-          .describe('For a directed offer (directed: true on the board): the secret its poster handed you; the sponsor refuses the swap without it'),
       },
     },
     run(async (args, extra) => {
@@ -737,7 +736,6 @@ export function registerTools(server: McpServer, client: NightgateClient, config
             ...(args.offerId ? { offerId: args.offerId } : { makerHalfB64: taken.makerHalfB64 }),
             takerHalfB64: taken.takerHalfB64,
             idempotencyKey: k,
-            ...(args.takerSecret ? { takerSecret: args.takerSecret } : {}),
           },
           info: { id: taken.id, terms: taken.terms, bound: taken.bound, buildMs: taken.buildMs },
           detail: { halfId: taken.id },
@@ -786,7 +784,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         'never NIGHT, at most 4 inputs and 2 outputs per half, and the halves mirror each other ' +
         'in types and amounts. A half may be bound or unbound and is passed as offer file text ' +
         'or base64. Off on a server by default (NIGHTGATE_SPONSOR_ALLOW_SWAPS); an agent grant ' +
-        'needs sponsorSwap in its allowedActions. Job result { txHash, transactionHash, swap: { gives, wants } }. ' +
+        'needs sponsorSwap in its allowedActions. Job result { txId, txHash, swap: { gives, wants } }. ' +
         'An offer fills once: if it was taken first by somebody else the job fails. Pass both ' +
         'halves, or `halfId` alone for an offer this server took (take_swap_offer keeps both ' +
         'halves); with `offerId` the maker half comes from the board, next to takerHalf or the ' +
@@ -800,8 +798,6 @@ export function registerTools(server: McpServer, client: NightgateClient, config
           .describe('Id of the half this server built for the swap: alone it names a taken offer, next to both halves it ties the job to the half'),
         offerId: z.string().uuid().optional()
           .describe('An offer on the server\'s board (list_swap_offers): the server takes the maker half from there; pass takerHalf or the halfId of the taken offer with it'),
-        takerSecret: z.string().min(1).max(256).optional()
-          .describe('For a directed board offer: the secret its poster handed you'),
       },
     },
     run(async (args, extra) => {
@@ -821,7 +817,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
       const key = callKey('sponsorSwap', halves, args.idempotencyKey ?? null);
       const started = await startSponsored(client, key, args.idempotencyKey, async (k) => ({
         action: 'sponsorSwap',
-        body: { ...halves, idempotencyKey: k, ...(args.takerSecret ? { takerSecret: args.takerSecret } : {}) },
+        body: { ...halves, idempotencyKey: k },
       }));
       if (args.halfId) trackHalfJob(args.halfId, started.job);
       const settled = await awaitSwap(started.job, args.offerId, extra);
@@ -840,26 +836,21 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         'records its terms; the half itself stays signed by the maker. The offer closes when a ' +
         'swap that spends one of its inputs lands, on expiry, or by retire_swap_offer. Needs ' +
         'postSwapOffer in an agent grant\'s allowedActions. Returns { offerId, status, terms }. ' +
-        'With directed: true only a taker who knows the returned takerSecret can have the swap ' +
-        'sponsored: hand that secret to your counterparty, it is shown once.',
+        'Anyone may take a posted offer; for a deal with one partner hand the offer file to that partner instead.',
       inputSchema: {
         offer: swapHalf('The maker half, as offer file text or base64'),
         expiresAt: z.string().datetime().optional().describe('ISO timestamp; at most 90 days ahead'),
         tags: z.array(z.string().min(1).max(40)).max(8).optional().describe('Up to 8 tags for list_swap_offers'),
-        directed: z.boolean().optional()
-          .describe('true: the offer can only be taken with the takerSecret this call returns; for an invoice or an agreed OTC deal'),
       },
     },
     run(async (args) => {
-      const takerSecret = args.directed ? randomBytes(32).toString('hex') : undefined;
-      const posted = await client.callAction('postSwapOffer', {
+      const posted = await client.callAction<Record<string, unknown> | undefined>('postSwapOffer', {
         offer: args.offer,
         expiresAt: args.expiresAt,
         tags: args.tags,
-        ...(takerSecret ? { takerSecretHash: createHash('sha256').update(takerSecret, 'utf8').digest('hex') } : {}),
-      }) as Record<string, unknown> | undefined;
+      });
       await trackPostedHalf(args.offer, posted?.offerId).catch(() => { /* posted; the half is just not tied to it */ });
-      return takerSecret ? { ...posted, takerSecret } : posted;
+      return posted;
     }),
   );
 
@@ -958,15 +949,15 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         'chain access). A custom token is addressed by rawTokenType(domainSeparator, ' +
         'contractAddress); without it the minted balance cannot be transferred. domainSeparator ' +
         'is the plain string the contract pads (Compact pad(32, "...")) or 64 hex for the padded ' +
-        "bytes; defaults to the bundled test token's. The result is the tokenType of send_token and the swap tools.",
+        'bytes. The result is the tokenType of send_token and the swap tools.',
       inputSchema: {
         contractAddress: z.string().min(1).describe('The minting contract address (64 hex)'),
-        domainSeparator: z.string().optional()
-          .describe("Separator string or 64 hex; defaults to 'nightgate:zswap-e2e' (the bundled test token)"),
+        domainSeparator: z.string().min(1)
+          .describe('Separator string or 64 hex: what the contract mints under'),
       },
     },
     run(async (args) =>
-      client.callFunction('deriveTokenType', {
+      client.callFunction<DeriveTokenTypeAnswer>('deriveTokenType', {
         contractAddress: args.contractAddress,
         domainSeparator: args.domainSeparator,
       })),
@@ -1011,7 +1002,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
       const key = callKey('mintToken', input, args.idempotencyKey ?? null);
       const started = await startSponsored(client, key, args.idempotencyKey, async (k) => {
         const { unboundTxB64, ...built } = await buildMint(config, input);
-        return { action: 'sponsorUnboundTransaction', body: { unboundTxB64, idempotencyKey: k }, info: built };
+        return { action: 'sponsorUnbound', body: { unboundTxB64, idempotencyKey: k }, info: built };
       });
       const job = await awaitJob(client, config, started.job, extra, { tool: 'get_swap_wallet', args: {} });
       if (chainOutcome(job) === 'failed') forgetStart(key);
@@ -1045,7 +1036,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
       const key = callKey('burnToken', input, args.idempotencyKey ?? null);
       const started = await startSponsored(client, key, args.idempotencyKey, async (k) => {
         const { unboundTxB64, ...built } = await buildBurn(config, input);
-        return { action: 'sponsorUnboundTransaction', body: { unboundTxB64, idempotencyKey: k }, info: built };
+        return { action: 'sponsorUnbound', body: { unboundTxB64, idempotencyKey: k }, info: built };
       });
       const job = await awaitJob(client, config, started.job, extra, { tool: 'get_swap_wallet', args: {} });
       if (chainOutcome(job) === 'failed') forgetStart(key);
@@ -1170,7 +1161,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
           if (built.pendingId) await revertHalf(config, built.pendingId);
         };
         return {
-          action: bound ? 'sponsorFinalizedTransaction' : 'sponsorUnboundTransaction',
+          action: bound ? 'sponsorFinalized' : 'sponsorUnbound',
           body: { ...(bound ? { finalizedTxB64: txB64 } : { unboundTxB64: txB64 }), idempotencyKey: k },
           info: {
             contractAddress: input.contractAddress, circuit: input.circuit, bound, coins: built.coins,

@@ -122,13 +122,3 @@ test('the analytics URL may not take credentials over plain http either', () => 
   assert.throws(() => loadConfig({ ODATANO_ACCESS_KEY: 'oda_x', ODATANO_ANALYTICS_URL: 'http://astra.example.org/odata' }), /ODATANO_ANALYTICS_URL .* plain http/);
   assert.equal(loadConfig({ ODATANO_ACCESS_KEY: 'oda_x', ODATANO_ANALYTICS_URL: 'http://127.0.0.1:4005/odata' }).analyticsUrl, 'http://127.0.0.1:4005/odata');
 });
-
-test('wrapped witnesses keep class methods and report the last private state', async () => {
-  const { trackWitnesses } = await import('../../dist/contract-call.js');
-  class Pot { constructor() { this.secret = 7; } secretKey(ctx) { return [{ ...ctx.privateState, used: true }, this.secret]; } }
-  let seen;
-  const w = trackWitnesses(new Pot(), (s) => { seen = s; });
-  assert.deepEqual(w.secretKey({ privateState: { n: 1 } }), [{ n: 1, used: true }, 7]);
-  assert.deepEqual(seen, { n: 1, used: true });
-  assert.equal(w.secret, 7);
-});

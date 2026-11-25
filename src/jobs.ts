@@ -2,7 +2,8 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID } from 'node:crypto';
 import type { RequestHandlerExtra } from '@modelcontextprotocol/sdk/shared/protocol.js';
 import type { ServerNotification, ServerRequest } from '@modelcontextprotocol/sdk/types.js';
-import { NightgateApiError, type NightgateClient } from './client.js';
+import type { JobStatus } from '@odatano/nightgate-tx/client';
+import { NightgateApiError, raw, type NightgateClient } from './client.js';
 import type { NightgateMcpConfig } from './config.js';
 
 export type ToolExtra = RequestHandlerExtra<ServerRequest, ServerNotification>;
@@ -47,8 +48,6 @@ export function chainOutcome(job: Record<string, unknown> | undefined): 'landed'
 }
 /** How long a started job is kept, so a repeated call picks it up instead of submitting again. */
 const STARTED_TTL_MS = 3_600_000;
-// Off for this process once the server refuses getJobStatus' waitMs.
-let longPoll = true;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -253,16 +252,18 @@ function nextStep(job: Record<string, unknown>): string | undefined {
   return 'Nothing was applied. Read errorCode and errorMessage, fix the input and run the tool again.';
 }
 
-/** Reads the job's status once, waiting on the server where it can. The session is sent when known; a current server needs none. */
+/** Reads a job's status once. `waitMs` lets the server hold the answer until the job moves. The session is sent when known. */
+export function readJobStatus(client: NightgateClient, jobId: string, sessionId: string | undefined, waitMs?: number): Promise<JobStatus> {
+  return client.callFunction<JobStatus>('getJobStatus', {
+    jobId: raw(jobId),
+    sessionId: sessionId ? raw(sessionId) : undefined,
+    waitMs: waitMs && waitMs > 0 ? waitMs : undefined,
+  });
+}
+
 async function readJob(client: NightgateClient, config: NightgateMcpConfig | undefined, jobId: string, sessionId: string | undefined): Promise<Record<string, unknown>> {
-  const waitMs = longPoll ? Math.min(JOB_WAIT_MS, Math.max(0, (config?.timeoutMs ?? 30_000) - 5_000)) : 0;
-  try {
-    return await client.callAction('getJobStatus', waitMs > 0 ? { jobId, sessionId, waitMs } : { jobId, sessionId }) as Record<string, unknown>;
-  } catch (err) {
-    if (!(waitMs > 0 && err instanceof NightgateApiError && err.status === 400 && /waitMs/.test(err.message))) throw err;
-    longPoll = false;
-    return await client.callAction('getJobStatus', { jobId, sessionId }) as Record<string, unknown>;
-  }
+  const waitMs = Math.min(JOB_WAIT_MS, Math.max(0, (config?.timeoutMs ?? 30_000) - 5_000));
+  return { ...await readJobStatus(client, jobId, sessionId, waitMs) };
 }
 
 // Waits until a sponsor job settled and, for a swap or transfer, until the block confirmed it, so the
@@ -303,11 +304,7 @@ export async function awaitJob(
 function outcome(job: Record<string, unknown>, check?: JobCheck, statusError?: string): Record<string, unknown> {
   const { sessionId: _s, result, ...rest } = job;
   const out: Record<string, unknown> = { ...rest };
-  if (typeof result === 'string' && result) {
-    try { out.result = JSON.parse(result); } catch { out.result = result; }
-  } else if (result !== undefined && result !== null) {
-    out.result = result;
-  }
+  if (result !== undefined && result !== null) out.result = result;
   if (!settled(job)) {
     out.status = 'pending';
     out.next = 'The job runs on. Run this tool again with the same arguments to wait for it; it submits nothing new.';

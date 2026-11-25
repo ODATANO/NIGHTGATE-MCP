@@ -330,22 +330,6 @@ async function keepPrivateState(config: NightgateMcpConfig, key: string, state: 
   await writePrivateStates(config, Object.fromEntries([...privateStates].map(([k, v]) => [k, encodeState(v)])));
 }
 
-/** Wraps witness functions, also class methods and getters, so the private state the last one returned is known after the build. */
-// Exported for the unit tests only.
-export function trackWitnesses(witnesses: object, record: (state: unknown) => void): object {
-  return new Proxy(witnesses, {
-    get(target, name, receiver) {
-      const value = Reflect.get(target, name, receiver);
-      if (typeof value !== 'function') return value;
-      return (...a: unknown[]) => {
-        const out = value.apply(target, a);
-        if (Array.isArray(out) && out.length === 2) record(out[0]);
-        return out;
-      };
-    },
-  });
-}
-
 /**
  * Build, prove and sign one circuit call locally: unbound when the wallet funds nothing, bound when it does.
  * `callKey` names the request, so a NIGHT pay-in that is resent is not taken for a second one.
@@ -391,8 +375,7 @@ export async function buildContractCall(config: NightgateMcpConfig, input: Contr
     if (own) stateHold = takeGate(stateGate, callKey, `a call on ${contractAddress.slice(0, 16)}… that may change its private state`, { packageName: input.package });
     const stateKey = `${input.package}|${contractAddress}`;
     const initialPrivateState = own ? (await savedPrivateState(config, stateKey)) ?? own.privateState : undefined;
-    let privateState = initialPrivateState;
-    const witnesses = own ? trackWitnesses(own.witnesses, (s) => { privateState = s; }) : {};
+    const witnesses = own ? own.witnesses : {};
     const t1 = Date.now();
     setStage('proving');
     const bound = coins.length > 0 || unshielded;
@@ -410,6 +393,7 @@ export async function buildContractCall(config: NightgateMcpConfig, input: Contr
       throw err;
     }
     const txB64 = String(bound ? built.finalizedTxB64 : built.unboundTxB64);
+    const privateState: unknown = built.nextPrivateState;
     if (nightGate) nightGate.txB64 = txB64;
     if (stateHold) stateHold.txB64 = txB64;
     const pendingId = coins.length

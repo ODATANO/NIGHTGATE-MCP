@@ -62,7 +62,7 @@ const t0 = Date.now();
 const built = await call('build_sponsorable_transaction', {
   contractAddress: VAULT, call: 'attest',
   params: { payloadHash, metadataHash: randomBytes(32).toString('hex') },
-  compiledArtifactRef: ARTIFACT,
+  contractName: ARTIFACT,
 });
 console.log(`built locally in ${((Date.now() - t0) / 1000).toFixed(1)}s (${built.provingMode}, ${built.serializedBytes} bytes, ${built.channel})`);
 
@@ -70,7 +70,7 @@ const t1 = Date.now();
 const job = await call('sponsor_unbound_transaction', { txId: built.txId });
 console.log(`job ${job.status} after ${((Date.now() - t1) / 1000).toFixed(1)}s`, job.errorCode ? `(${job.errorCode})` : '', JSON.stringify(job.result ?? '').slice(0, 160));
 
-const v = await call('verify_attestation', { contractAddress: VAULT, attesterId: me.attesterId, payloadHash, compiledArtifactRef: ARTIFACT });
+const v = await call('verify_attestation', { contractAddress: VAULT, attesterId: me.attesterId, payloadHash, contractName: ARTIFACT });
 console.log('verify_attestation:', JSON.stringify(v));
 await client.close();
 await closeBuilder();

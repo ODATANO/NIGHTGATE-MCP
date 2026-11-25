@@ -10,9 +10,9 @@ sandbox vault of the network and to the `attestation-vault-32` lineage.
 
 With only `ODATANO_ACCESS_KEY` set:
 
-1. `anchor_document` with the sha256 of a document. It builds the transaction,
+1. `anchor_document` with the hash of a document as `payloadHash`, usually its sha256. It builds the transaction,
    the sponsor pays, and after about a minute the answer carries `status`,
-   `attesterId`, `txHash` and `check`.
+   `attesterId`, `txId`, `txHash` and `check`.
 2. `check` is the `verify_attestation` call that shows the record on-chain.
    Run it as given. It is free.
 
@@ -26,7 +26,7 @@ The first build downloads the prover keys and creates the seed file (see
 | `verify_attestation`, `verify_predicate` | Check a record or a ZK claim against live contract state; absent = `verified: false`. Free |
 | `prepare_document_proof`, `prepare_membership_set` | Build proof inputs: salted content tree, set root |
 | `anchor_document` | Anchor a document hash, optionally with its content root, in one call |
-| `submit_vault_call` | Any vault call in one call: ZK claims over a hidden field, claims across two documents, disclosure, passports |
+| `submit_vault_call` | Any vault call in one call: ZK claims over a hidden field, claims across two documents, disclosure, document ids |
 | `build_sponsorable_transaction`, `get_attester_identity` | Build a vault call and keep the bytes under a `txId` or in `outFile`, for a sponsor elsewhere. The attester id, shielded keys and NIGHT address of the seed |
 | `sponsor_unbound_transaction`, `sponsor_finalized_transaction` | Hand bytes built elsewhere to a sponsor, by `txId` or `file`, and wait for the job |
 | `get_swap_wallet`, `read_swap_offer` | What the local wallet holds, shielded coins and NIGHT; what an offer gives and wants |
@@ -48,8 +48,8 @@ Errors carry the server's HTTP status and `code` (`INVALID_ARGUMENT`, ...).
 | Field | Meaning |
 |---|---|
 | `status` | `succeeded`, `failed`, or `pending` when the job is still open after 5 minutes or its status cannot be read. A write waits for the block: `chainStatus` is `success`, or `failure`/`dropped` with `next` |
-| `txHash` | Ledger identifier of the transaction |
-| `transactionHash` | Hash the explorers show, null until indexed |
+| `txId` | Ledger identifier of the transaction |
+| `txHash` | The ledger hash explorers show, null before the send |
 | `result` | The job result, for a swap `swap`, for a mint `tokenType` |
 | `errorCode`, `errorMessage`, `next` | Why it failed and what to do |
 | `statusError` | With `pending`: why the status could not be read |
@@ -139,7 +139,7 @@ file and so one identity. For separate identities, give each server its own
 
 1. `prepare_document_proof` with the document and the fields to make
    provable. Keep `opening` with the document.
-2. `anchor_document` with `sha256: payloadHash`, `contentRoot` and `schemaId`.
+2. `anchor_document` with `payloadHash`, `contentRoot` and `schemaId`.
 3. `submit_vault_call` with `proveFieldPredicate`, `proveFieldEquality` or
    `proveFieldMembership`, the params listed in `build_sponsorable_transaction`
    and the field's witness as `merkleProof`. The witness stays here.
@@ -180,7 +180,8 @@ the host and the reason the indexer gave.
 2. Maker: `build_swap_offer` with `give` and `want` returns the offer file
    (`swapoffer1...`) to publish, or `post_swap_offer` puts it on the server's
    board.
-3. Taker: `list_swap_offers` or `read_swap_offer`, then `take_swap_offer` with
+3. Taker: `list_swap_offers` to find an offer and `get_swap_offer` for its half, or
+   `read_swap_offer` on an offer file, then `take_swap_offer` with
    `expect`, `submit: true` and, for a board entry, its `offerId`. It builds
    the mirror half, submits both and waits; the result carries `swap`.
 4. The maker follows the offer with `get_swap_offer` or `my_swap_offers`
@@ -198,9 +199,8 @@ the host and the reason the indexer gave.
   expired or was retired 15 minutes ago, and that went into no job, is released
   on its own at the next `get_swap_wallet` or board read (`released`).
   `reserved` in `get_swap_wallet` is the SDK's own list of reserved coins.
-- `post_swap_offer` with `directed: true` returns a `takerSecret` once: only a
-  taker who passes it to `take_swap_offer` or `sponsor_swap` gets the swap
-  sponsored, so an invoice or an agreed deal goes to its counterparty alone.
+- The board lists offers anyone can take. For a deal with one partner, hand
+  the offer file to that partner instead of posting it.
 - A refused submission keeps the proven half: `sponsor_swap` with its `halfId`.
 - The sponsor needs swaps switched on and both token types on its list; an
   agent grant needs `sponsorSwap` in `allowedActions`.
@@ -257,7 +257,7 @@ the host and the reason the indexer gave.
 
   A payout the circuit makes to this wallet (`sendUnshielded`, a claim, a
   refund) needs nothing extra. A call that funds anything is bound and goes
-  through `sponsorFinalizedTransaction`, one without through the parallel
+  through `sponsorFinalized`, one without through the parallel
   channel. The coins a `$coin` call reserved are
   listed in `get_swap_wallet` (role `call`) until the call landed; a call the
   sponsor or the chain refused gives them back. `NIGHTGATE_CALL_PACKAGES`

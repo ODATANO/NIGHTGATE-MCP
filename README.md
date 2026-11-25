@@ -42,7 +42,7 @@ Claude Code: `claude mcp add nightgate --env ODATANO_ACCESS_KEY=oda_... -- npx -
 The hosted gateway is the default (Midnight preprod). The same key works for
 `@odatano/core-mcp` (Cardano). Node.js >= 20.
 
-That is all the setup. `anchor_document` with the sha256 of a document anchors
+That is all the setup. `anchor_document` with the hash of a document (`payloadHash`) anchors
 it in the shared sandbox vault and answers once it landed, with the free
 `verify_attestation` call that shows it on-chain. The first write creates your
 seed in `~/.nightgate-mcp/seed` and says so; keep that file, it is your
@@ -59,7 +59,7 @@ Errors carry the server's HTTP status and `code`.
 ## Configuration
 
 [docs/configuration.md](docs/configuration.md): every variable, an own
-NIGHTGATE instance, version requirements. Needs NIGHTGATE >= 0.43.1 on a ledger 9
+NIGHTGATE instance, version requirements. Needs NIGHTGATE >= 0.47.0 on a ledger 9
 network; a network before its fork stays on MCP 0.21.0. `build_sponsorable_transaction`
 builds on contracts deployed after ledger 9. A contract deployed before keeps its ledger 8
 verifier keys; `call_contract` builds on it with the package version compiled for ledger 8,

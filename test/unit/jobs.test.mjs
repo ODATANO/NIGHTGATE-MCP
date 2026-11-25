@@ -6,18 +6,16 @@ import { apiError, NightgateApiError } from '../../dist/client.js';
 
 const timeout = () => Object.assign(new Error('The operation was aborted due to timeout'), { name: 'TimeoutError' });
 
-/** A client whose callAction answers from a list of results or errors, recording every call. */
+/** A client whose actions and functions answer from a list of results or errors, recording every call. */
 function fakeClient(answers) {
   const calls = [];
-  return {
-    calls,
-    async callAction(action, body) {
-      calls.push({ action, body });
-      const next = answers.shift();
-      if (next instanceof Error) throw next;
-      return typeof next === 'function' ? next(action, body) : next;
-    },
+  const answer = async (action, body) => {
+    calls.push({ action, body });
+    const next = answers.shift();
+    if (next instanceof Error) throw next;
+    return typeof next === 'function' ? next(action, body) : next;
   };
+  return { calls, callAction: answer, callFunction: answer };
 }
 
 test('chainOutcome reads status and chain status', () => {
@@ -165,8 +163,9 @@ test('a job is read by its id alone when no session is known', async () => {
   const job = await awaitJob(client, { timeoutMs: 30_000 }, { jobId: 'j-plain', status: 'running' }, undefined);
   assert.equal(job.status, 'succeeded');
   assert.equal(client.calls[0].action, 'getJobStatus');
-  assert.equal(client.calls[0].body.jobId, 'j-plain');
+  assert.deepEqual(client.calls[0].body.jobId, { $raw: 'j-plain' });
   assert.equal(client.calls[0].body.sessionId, undefined);
+  assert.equal(client.calls[0].body.waitMs, 20_000);
 });
 
 test('an error body that names the job of a key conflict keeps it', () => {
