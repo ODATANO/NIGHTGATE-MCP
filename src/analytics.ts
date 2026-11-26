@@ -1,5 +1,6 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
+import { toolInput } from './tool-input.js';
 import type { NightgateClient } from './client.js';
 import { wrapHandler } from './tools.js';
 
@@ -55,7 +56,7 @@ export function registerAnalyticsTools(server: McpServer, client: NightgateClien
         'analytics behind index), blocks and transactions of the last hour with change vs the hour before, ' +
         'fees of the last 24 h in DUST (total, median, p95), average block time and transactions per block. ' +
         'While backfilling is true the recent windows are incomplete - read lastBlockAt.',
-      inputSchema: {},
+      inputSchema: toolInput({}),
     },
     run(async () => rows(await client.analyticsQuery('ChainOverview', { filter: chainFilter }))),
   );
@@ -69,10 +70,10 @@ export function registerAnalyticsTools(server: McpServer, client: NightgateClien
         'report the sum (blocks, regular transactions, shielded, with proof, contract calls/deploys, failed, ' +
         'system extrinsics), distributions the average (block interval, tx size, fee paid, fee estimate error). ' +
         'Narrow to one metric with `metric`.' + METRIC_HINT,
-      inputSchema: {
+      inputSchema: toolInput({
         window: z.enum(WINDOWS).optional().describe('Rolling window (default 24h)'),
         metric: z.string().min(1).max(60).optional().describe('One metric id only, e.g. tx.shielded'),
-      },
+      }),
     },
     run(async (args) => {
       const parts = [chainFilter, `window eq '${args.window ?? '24h'}'`];
@@ -89,11 +90,11 @@ export function registerAnalyticsTools(server: McpServer, client: NightgateClien
         'time, tx per block. transactions: regular count, avg tx size, system extrinsics, shielded, with ZK ' +
         'proof, contract calls, contract deploys, failed. fees: total, fee-paying tx, avg/median/p95/max fee ' +
         'paid in DUST, total estimated fees, avg estimate error. Columns Midnight does not have are null.',
-      inputSchema: {
+      inputSchema: toolInput({
         topic: z.enum(Object.keys(DAILY_TOPICS) as [keyof typeof DAILY_TOPICS, ...Array<keyof typeof DAILY_TOPICS>])
           .describe('Which daily table'),
         days: z.number().int().min(1).max(MAX_ROWS).optional().describe('How many days back including today (default 14)'),
-      },
+      }),
     },
     run(async (args) => {
       const days = args.days ?? 14;
@@ -111,10 +112,10 @@ export function registerAnalyticsTools(server: McpServer, client: NightgateClien
       description:
         'Midnight block authors ranked by blocks produced over a window (count; sum is the bytes produced), ' +
         'exact over the whole window. `entities` says how many distinct authors the window holds.',
-      inputSchema: {
+      inputSchema: toolInput({
         window: z.enum(RANKING_WINDOWS).optional().describe('24h, 7d, 14d or 30d (default 24h)'),
         limit: z.number().int().min(1).max(MAX_ROWS).optional().describe('Rows (default 10)'),
-      },
+      }),
     },
     run(async (args) => rows(await client.analyticsQuery('TopBlockProducers', {
       filter: `${chainFilter} and window eq '${args.window ?? '24h'}' and rank le ${args.limit ?? 10}`,
@@ -129,7 +130,7 @@ export function registerAnalyticsTools(server: McpServer, client: NightgateClien
         'The catalogue of Midnight metrics ASTRA computes: id, name, kind (counter / distribution), scope, ' +
         'unit and description. Use the ids with analytics_metric, analytics_series, analytics_compare and ' +
         'analytics_key_figures.',
-      inputSchema: {},
+      inputSchema: toolInput({}),
     },
     run(async () => rows(await client.analyticsQuery('Metrics', {
       filter: chainFilter, select: 'ID,name,kind,scope,unit,description', orderby: 'ID', top: 200,
@@ -142,10 +143,10 @@ export function registerAnalyticsTools(server: McpServer, client: NightgateClien
       description:
         'One Midnight metric over one rolling window with the previous window and the change in percent: ' +
         'value, count, sum, avg, min, max, p50, p95, stddev, block range.' + METRIC_HINT,
-      inputSchema: {
+      inputSchema: toolInput({
         metric: z.string().min(1).max(60).describe('Metric id, e.g. tx.withProof'),
         window: z.enum(WINDOWS).optional().describe('Rolling window (default 24h)'),
-      },
+      }),
     },
     run(async (args) => client.analyticsFunction('getWindow', { chain: CHAIN, metric: args.metric, window: args.window ?? '24h' })),
   );
@@ -156,10 +157,10 @@ export function registerAnalyticsTools(server: McpServer, client: NightgateClien
       description:
         'Time series of one Midnight metric in the resolution of the window: 1h -> minutes, 24h -> hours, ' +
         '7d/14d/30d -> days. Each point: count, sum, avg, min, max, p50, p95, block range.' + METRIC_HINT,
-      inputSchema: {
+      inputSchema: toolInput({
         metric: z.string().min(1).max(60).describe('Metric id, e.g. fees.paid'),
         window: z.enum(WINDOWS).optional().describe('Rolling window (default 24h)'),
-      },
+      }),
     },
     run(async (args) => client.analyticsFunction('getSeries', { chain: CHAIN, metric: args.metric, window: args.window ?? '24h' })),
   );
@@ -170,10 +171,10 @@ export function registerAnalyticsTools(server: McpServer, client: NightgateClien
       description:
         'The same metric for Midnight and Cardano side by side over one window (only chains that have the ' +
         'metric answer): tx.count, blocks.count, blocks.interval, fees.paid, ... Fee units differ (DUST vs lovelace).' + METRIC_HINT,
-      inputSchema: {
+      inputSchema: toolInput({
         metric: z.string().min(1).max(60).describe('Metric id both chains know, e.g. tx.count'),
         window: z.enum(WINDOWS).optional().describe('Rolling window (default 24h)'),
-      },
+      }),
     },
     run(async (args) => rows(await client.analyticsFunction('compare', { metric: args.metric, window: args.window ?? '24h' }))),
   );
@@ -184,10 +185,10 @@ export function registerAnalyticsTools(server: McpServer, client: NightgateClien
       description:
         'Midnight days that sit far from their own recent baseline, in standard deviations, over the last ' +
         'COMPLETE day: metric, value, baseline, stddev, z, direction. Every number the verdict rests on comes back.',
-      inputSchema: {
+      inputSchema: toolInput({
         threshold: z.number().min(1).max(20).optional().describe('z-score threshold (default 3)'),
         baselineDays: z.number().int().min(3).max(90).optional().describe('Days the baseline is built from (default 14)'),
-      },
+      }),
     },
     run(async (args) => client.analyticsFunction('getAnomalies', {
       chain: CHAIN, threshold: args.threshold ?? 3, baselineDays: args.baselineDays ?? 14,

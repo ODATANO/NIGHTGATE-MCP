@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
+import { toolInput } from './tool-input.js';
 import type { VerifyAttestationAnswer, VerifyPredicateAnswer, PrepareDocumentProofAnswer, PrepareMembershipSetAnswer, DeriveTokenTypeAnswer } from '@odatano/nightgate-tx/client';
 import { raw, NightgateApiError, NightgateClient } from './client.js';
 import { isGatewayKey, vaultOf, type NightgateMcpConfig } from './config.js';
@@ -179,7 +180,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         'about documentId lookups: true when the vault registrar assigned that id to this ' +
         'attester. A record anchored without a document id reports false, and that is fine. ' +
         'Free: it reads the public verify service.',
-      inputSchema: {
+      inputSchema: toolInput({
         contractAddress: CONTRACT,
         attesterId: hex64('attesterId').optional()
           .describe('The attester whose record to check (64 hex; get_attester_identity for this server\'s own). Required unless documentId is given'),
@@ -193,7 +194,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         network: z.enum(['preview', 'preprod', 'mainnet']).optional()
           .describe('Read from another network public indexer instead of the configured one'),
         contractName: z.string().optional().describe("Contract artifact ref, defaults to 'attestation-vault-32'; 'attestation-vault' for a 16-slot vault"),
-      },
+      }),
     },
     run(async (args) => {
       if (!args.documentId && !(args.attesterId && args.payloadHash)) {
@@ -224,7 +225,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         '(recompute it from the published list via prepare_membership_set). Every claim is bound ' +
         'to ONE attester\'s record of the document, so attesterId is part of the coordinates. ' +
         'Free: it reads the public verify service.',
-      inputSchema: {
+      inputSchema: toolInput({
         contractAddress: CONTRACT,
         attesterId: hex64('attesterId').describe('The attester whose record of payloadHash carries the claim (64 hex)'),
         payloadHash: hex64('payloadHash').describe('The attestation payload hash (64 hex)'),
@@ -249,7 +250,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         network: z.enum(['preview', 'preprod', 'mainnet']).optional()
           .describe('Read from another network public indexer instead of the configured one'),
         contractName: z.string().optional().describe("Contract artifact ref, defaults to 'attestation-vault-32'; 'attestation-vault' for a 16-slot vault"),
-      },
+      }),
     },
     run(async (args) => {
       if ((args.predicate === 'lessOrEqual' || args.predicate === 'greaterOrEqual') && args.threshold === undefined) {
@@ -305,7 +306,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         'byte-for-byte; omit it for a fresh document. The returned fields carry witness material ' +
         '(scaled values / digests / salts): treat as sensitive. Store canonicalDocument at your ' +
         'storageRef; re-serializing with different key order will not re-hash equal.',
-      inputSchema: {
+      inputSchema: toolInput({
         document: z.record(z.string(), z.unknown())
           .describe('The full document as a JSON object; all of it goes into payloadHash'),
         proofFields: z.array(z.object({
@@ -319,7 +320,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         saltSeed: hex64('saltSeed').optional()
           .describe('Reuse a stored salt seed to reproduce an already-anchored root; omit for a fresh document (random seed)'),
         contractName: z.string().optional().describe("Contract artifact ref, defaults to 'attestation-vault-32'; 'attestation-vault' for a 16-slot vault"),
-      },
+      }),
     },
     run(async (args) =>
       client.callAction<PrepareDocumentProofAnswer>('prepareDocumentProof', {
@@ -340,7 +341,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         'published list alone: use the root to verify_predicate a setMembership claim. With ' +
         'value/valueDigest it additionally returns the member inclusion path (witness material, ' +
         'treat as sensitive); a non-member is a clean 400. Compute-only and synchronous.',
-      inputSchema: {
+      inputSchema: toolInput({
         allowedValues: z.array(z.string().min(1)).min(1).max(64)
           .describe('The public allow-list (up to 64 distinct values)'),
         value: z.string().min(1).optional()
@@ -348,7 +349,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         valueDigest: hex64('valueDigest').optional()
           .describe('Optional member digest (64 hex) instead of the raw value'),
         contractName: z.string().optional().describe("Contract artifact ref, defaults to 'attestation-vault-32'; 'attestation-vault' for a 16-slot vault"),
-      },
+      }),
     },
     run(async (args) => {
       if (args.value !== undefined && args.valueDigest !== undefined) {
@@ -409,8 +410,9 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         'document yourself. With contentRoot and schemaId from prepare_document_proof it also ' +
         'anchors the content root, which the field claims of submit_vault_call need. Returns ' +
         '{ status, attesterId, payloadHash, contractAddress, metadataJson, txId, txHash, ' +
-        'timings, check }; check is the verify_attestation call that shows the record on-chain. ' + RETRY_HINT,
-      inputSchema: {
+        'timings, check }; check is the verify_attestation call that shows the record on-chain. ' +
+        "With a content root, txId and txHash are the root's, anchorTxId and anchorTxHash the anchor's. " + RETRY_HINT,
+      inputSchema: toolInput({
         payloadHash: hex64('payloadHash').describe('Hash of the document (64 hex), usually its sha256'),
         metadata: z.record(z.string(), z.unknown()).optional()
           .describe('Public metadata; its sha256 is anchored with the hash. Default none'),
@@ -420,7 +422,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         contractName: z.enum(BUILDABLE_ARTIFACTS).optional()
           .describe("Vault lineage, default 'attestation-vault-32' (the sandbox vaults); 'attestation-vault' for a 16-slot vault"),
         idempotencyKey: z.string().optional().describe('Dedupes retries of the same anchor'),
-      },
+      }),
     },
     run(async (args, extra) => {
       if (!!args.contentRoot !== !!args.schemaId) throw new Error('pass contentRoot and schemaId together');
@@ -442,7 +444,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
       const root = await submitVaultCall(
         { contractAddress, call: 'anchorContentRoot', params: { payloadHash, contentRoot: args.contentRoot, schemaId: args.schemaId }, contractName: ref },
         args.idempotencyKey && `${args.idempotencyKey}:root`, extra);
-      return { ...root, payloadHash, metadataJson, anchorTxHash: anchor.txHash, anchorTimings: anchor.timings };
+      return { ...root, payloadHash, metadataJson, anchorTxId: anchor.txId, anchorTxHash: anchor.txHash, anchorTimings: anchor.timings };
     }),
   );
 
@@ -459,7 +461,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         'used here and never sent. Returns { status, attesterId, contractAddress, txId, ' +
         'txHash, timings, check }; check is the free verify call that shows the effect on-chain. ' +
         'A failed job says in `next` what to do. ' + RETRY_HINT,
-      inputSchema: {
+      inputSchema: toolInput({
         contractAddress: CONTRACT,
         call: z.enum(BUILDABLE_CALLS).describe('Which circuit to call'),
         params: z.record(z.string(), z.union([z.string(), z.number()]))
@@ -471,7 +473,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         contractName: z.enum(BUILDABLE_ARTIFACTS).optional()
           .describe("Vault lineage, default 'attestation-vault-32' (the sandbox vaults); 'attestation-vault' for a 16-slot vault"),
         idempotencyKey: z.string().optional().describe('Dedupes retries of the same call'),
-      },
+      }),
     },
     run(async (args, extra) => submitVaultCall({
       contractAddress: vault(args.contractAddress, args.contractName), call: args.call, params: args.params,
@@ -511,7 +513,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         'prepare_document_proof. All hashes 64 hex. The built bytes are valid for ' +
         'the transaction TTL (~30 min) and against the contract state at build time: if the ' +
         'sponsor job ends CHAIN_EXECUTION_FAILED, build again.',
-      inputSchema: {
+      inputSchema: toolInput({
         contractAddress: CONTRACT,
         call: z.enum(BUILDABLE_CALLS).describe('Which circuit to call'),
         params: z.record(z.string(), z.union([z.string(), z.number()]))
@@ -526,7 +528,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
           .describe("Vault lineage to build against, defaults to 'attestation-vault-32' (the hosted sandbox vaults). Use 'attestation-vault' for a 16-slot vault: it has its own circuits, so the builder loads that contract class and fetches ITS prover keys from the server's /zk-config. The address must belong to the lineage named here"),
         outFile: z.string().min(1).optional()
           .describe('Also write the built bytes as base64 to this path, for a sponsor tool on another server (its file argument)'),
-      },
+      }),
     },
     run(async (args) => {
       if (!config) throw new Error('local building is not configured for this server instance');
@@ -548,7 +550,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         'address a sender pays NIGHT to. Use it to check ' +
         'verify_attestation results against the identity that will appear on-chain; builds ' +
         'nothing and submits nothing.',
-      inputSchema: {},
+      inputSchema: toolInput({}),
     },
     run(async () => {
       if (!config) throw new Error('local building is not configured for this server instance');
@@ -568,14 +570,14 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         'list and refuses anything outside it. The transaction expires with its TTL (default 30 min), ' +
         'so hand it over promptly. This is the SERIAL channel; for parallel submission build with ' +
         'bind:false and use sponsor_unbound_transaction. ' + WAIT_HINT,
-      inputSchema: {
+      inputSchema: toolInput({
         txId: TX_ID.describe('txId returned by build_sponsorable_transaction (bind:true) on this server; the bytes never pass through the conversation'),
         file: TX_FILE,
         finalizedTxB64: z.string().min(1).optional()
           .describe('Base64 of the caller-finalized, fee-unpaid transaction, only when neither txId nor file is available: long base64 copied through a model loses characters'),
         idempotencyKey: z.string().optional()
           .describe('Dedupes retries; the request is also fingerprinted by the transaction bytes'),
-      },
+      }),
     },
     run(async (args, extra) => {
       const { b64, sent } = await resolveTxSource({ txId: args.txId, file: args.file, b64: args.finalizedTxB64 }, 'finalizedTxB64');
@@ -597,14 +599,14 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         'call does not apply and the job ends failed with errorCode CHAIN_EXECUTION_FAILED (the ' +
         'transaction hash is in the error); then REBUILD the transaction against the current ' +
         'contract state and sponsor again (never resubmit the same bytes). ' + WAIT_HINT,
-      inputSchema: {
+      inputSchema: toolInput({
         txId: TX_ID.describe('txId returned by build_sponsorable_transaction on this server; the bytes never pass through the conversation'),
         file: TX_FILE,
         unboundTxB64: z.string().min(1).optional()
           .describe('Base64 of the caller-built, proven and signed UNBOUND transaction, only when neither txId nor file is available: long base64 copied through a model loses characters'),
         idempotencyKey: z.string().optional()
           .describe('Dedupes retries of the SAME bytes; a rebuilt transaction is a new key'),
-      },
+      }),
     },
     run(async (args, extra) => {
       const { b64, sent } = await resolveTxSource({ txId: args.txId, file: args.file, b64: args.unboundTxB64 }, 'unboundTxB64');
@@ -630,7 +632,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         'first, the balance of the free coins, their number and `reserved`, what a payment built here holds until it ' +
         'landed. A first sync of the shielded coins from genesis takes about 5 minutes, during which the answer is ' +
         '{ synced: false, syncingSeconds }: call again; the unshielded coins sync in seconds. Spends nothing.',
-      inputSchema: {},
+      inputSchema: toolInput({}),
     },
     run(async () => {
       if (!config) throw new Error('swaps are not configured for this server instance');
@@ -651,9 +653,9 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         "maker's side), the coins it carries, and whether it is bound. Refuses anything that is " +
         'not a plain swap half (a contract call, unshielded value, more than one token type ' +
         'given or wanted). Needs no wallet and no network. Check the terms here before take_swap_offer.',
-      inputSchema: {
+      inputSchema: toolInput({
         offer: swapHalf('The offer'),
-      },
+      }),
     },
     run(async (args) => readOffer(args.offer)),
   );
@@ -671,12 +673,12 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         'An offer refers to a recent chain state and expires with it, so publish it promptly. ' +
         '`give.amount` may not exceed `spendable` of get_swap_wallet. Proving takes about 200 s ' +
         'in-process, 11 to 17 s on a proof server (NIGHTGATE_PROOF_SERVER_URL). Spends no fee.',
-      inputSchema: {
+      inputSchema: toolInput({
         give: swapLeg('give'),
         want: swapLeg('want'),
         bind: z.boolean().optional()
           .describe('true (default): bound, with its offer file. false: unbound, base64 only (halfB64), for a taker that builds unbound too'),
-      },
+      }),
     },
     run(async (args) => {
       if (!config) throw new Error('swaps are not configured for this server instance');
@@ -700,7 +702,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         'half held under `halfId`: send it again with sponsor_swap({ halfId, offerId? }) or ' +
         'release its coins with revert_swap_offer. If the offer was taken by somebody else ' +
         'first, the job fails: revert_swap_offer.',
-      inputSchema: {
+      inputSchema: toolInput({
         offer: swapHalf('The offer to take'),
         expect: z.object({ gives: swapLeg('expect.gives'), wants: swapLeg('expect.wants') }).optional()
           .describe("The terms you agreed to, from the MAKER's side: what the offer gives and what it wants"),
@@ -709,7 +711,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         idempotencyKey: z.string().optional().describe('Dedupes retries of the same submission'),
         offerId: z.string().uuid().optional()
           .describe('The board entry the offer came from (list_swap_offers), so the fill is recorded against it'),
-      },
+      }),
     },
     run(async (args, extra) => {
       if (!config) throw new Error('swaps are not configured for this server instance');
@@ -760,10 +762,10 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         'works after a restart and needs the offer closed (expired or retired; retire_swap_offer first while it ' +
         'is open). It does not recall an offer somebody already holds: to make a published offer worthless, ' +
         'spend its coins in another swap. A half whose swap landed leaves the list; its coins are spent.',
-      inputSchema: {
+      inputSchema: toolInput({
         id: z.string().regex(/^[0-9a-f]{32}$/, 'id must be the 32 hex characters a swap tool returned').optional(),
         offerId: z.string().uuid().optional().describe('The board entry, instead of id'),
-      },
+      }),
     },
     run(async (args) => {
       if (!config) throw new Error('swaps are not configured for this server instance');
@@ -789,7 +791,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         'halves, or `halfId` alone for an offer this server took (take_swap_offer keeps both ' +
         'halves); with `offerId` the maker half comes from the board, next to takerHalf or the ' +
         'halfId of the taken offer. ' + RECEIPT_HINT + WAIT_HINT,
-      inputSchema: {
+      inputSchema: toolInput({
         makerHalf: swapHalf("The maker's half (the offer)").optional(),
         takerHalf: swapHalf("The taker's half").optional(),
         idempotencyKey: z.string().optional()
@@ -798,7 +800,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
           .describe('Id of the half this server built for the swap: alone it names a taken offer, next to both halves it ties the job to the half'),
         offerId: z.string().uuid().optional()
           .describe('An offer on the server\'s board (list_swap_offers): the server takes the maker half from there; pass takerHalf or the halfId of the taken offer with it'),
-      },
+      }),
     },
     run(async (args, extra) => {
       let halves: Record<string, string>;
@@ -837,11 +839,11 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         'swap that spends one of its inputs lands, on expiry, or by retire_swap_offer. Needs ' +
         'postSwapOffer in an agent grant\'s allowedActions. Returns { offerId, status, terms }. ' +
         'Anyone may take a posted offer; for a deal with one partner hand the offer file to that partner instead.',
-      inputSchema: {
+      inputSchema: toolInput({
         offer: swapHalf('The maker half, as offer file text or base64'),
         expiresAt: z.string().datetime().optional().describe('ISO timestamp; at most 90 days ahead'),
         tags: z.array(z.string().min(1).max(40)).max(8).optional().describe('Up to 8 tags for list_swap_offers'),
-      },
+      }),
     },
     run(async (args) => {
       const posted = await client.callAction<Record<string, unknown> | undefined>('postSwapOffer', {
@@ -865,7 +867,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         'time is up, so a watcher makes one call per change instead of one per interval. ' +
         'Filters are exact 64-hex token types and one tag. ' + BOARD_ROW_HINT +
         ' Every token may read the board.',
-      inputSchema: {
+      inputSchema: toolInput({
         givesType: hex64('givesType').optional().describe('Only offers that give this token type'),
         wantsType: hex64('wantsType').optional().describe('Only offers that want this token type'),
         tag: z.string().min(1).max(40).optional().describe('Only offers carrying this tag'),
@@ -874,7 +876,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         since: z.string().datetime().optional().describe('ISO timestamp; only offers changed after it'),
         waitMs: z.number().int().min(0).max(BOARD_WAIT_MAX_MS).optional()
           .describe('Hold the call while nothing matches, up to this many ms (at most 25000)'),
-      },
+      }),
     },
     run(async (args) => settleRows(await listOffers(client, { ...args, mine: null }))),
   );
@@ -888,13 +890,13 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         'was retired. status narrows to one state, since to offers changed after an instant, ' +
         'waitMs holds an empty answer until one of them changes. ' +
         BOARD_ROW_HINT,
-      inputSchema: {
+      inputSchema: toolInput({
         status: OFFER_STATUS.optional().describe('Default all'),
         since: z.string().datetime().optional().describe('ISO timestamp; only offers changed after it'),
         limit: z.number().int().min(1).max(200).optional().describe('Default 50'),
         waitMs: z.number().int().min(0).max(BOARD_WAIT_MAX_MS).optional()
           .describe('Hold the call while nothing matches, up to this many ms (at most 25000)'),
-      },
+      }),
     },
     run(async (args) => settleRows(await listOffers(client, { status: args.status ?? 'all', since: args.since, limit: args.limit, mine: true, waitMs: args.waitMs }))),
   );
@@ -906,9 +908,9 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         'One board offer by id, open or closed, in the board\'s shape: status, filledTxHash once a ' +
         'swap spent it, closedAt, changedAt. The way to follow an offer after post_swap_offer or ' +
         'after taking one. Unknown id: 404. ' + BOARD_ROW_HINT,
-      inputSchema: {
+      inputSchema: toolInput({
         offerId: z.string().uuid().describe('The board entry'),
-      },
+      }),
     },
     run(async (args) => settleRows(await client.callFunction('getSwapOffer', { offerId: raw(args.offerId) }))),
   );
@@ -921,7 +923,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         'offersFilledToday and swapsToday (UTC day), sponsorsConfigured and sponsorsReady (at tip ' +
         'with a spendable dust note; 0 means a sponsor_swap would wait or fail now), asOf. ' +
         'Computed at most every 10 s.',
-      inputSchema: {},
+      inputSchema: toolInput({}),
     },
     run(async () => client.callIndexerFunction('getBoardStatus')),
   );
@@ -934,9 +936,9 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         'reserved until revert_swap_offer releases the half built here (or until the 15-minute release of ' +
         'get_swap_wallet). Returns { offerId, status }: retired, or the status of an offer already closed ' +
         '(expired, retired, filled), so a lapsed offer answers expired instead of an error.',
-      inputSchema: {
+      inputSchema: toolInput({
         offerId: z.string().uuid().describe('The board entry'),
-      },
+      }),
     },
     run(async (args) => client.callAction('retireSwapOffer', { offerId: args.offerId })),
   );
@@ -950,11 +952,11 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         'contractAddress); without it the minted balance cannot be transferred. domainSeparator ' +
         'is the plain string the contract pads (Compact pad(32, "...")) or 64 hex for the padded ' +
         'bytes. The result is the tokenType of send_token and the swap tools.',
-      inputSchema: {
+      inputSchema: toolInput({
         contractAddress: z.string().min(1).describe('The minting contract address (64 hex)'),
         domainSeparator: z.string().min(1)
           .describe('Separator string or 64 hex: what the contract mints under'),
-      },
+      }),
     },
     run(async (args) =>
       client.callFunction<DeriveTokenTypeAnswer>('deriveTokenType', {
@@ -975,7 +977,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         '({ tokenType, domain, issuerKey }); a landed mint makes the type known to the sponsor ' +
         '(swaps, offer board). The recipient defaults to this wallet (get_attester_identity); ' +
         'another wallet takes both of its keys. ' + WAIT_HINT,
-      inputSchema: {
+      inputSchema: toolInput({
         contractAddress: hex64('contractAddress').describe('A token-factory deployment'),
         name: z.string().min(1).refine((s) => Buffer.byteLength(s, 'utf8') <= 32, 'name must be at most 32 UTF-8 bytes')
           .describe('Token name, at most 32 UTF-8 bytes; with the issuer it names the token type'),
@@ -988,7 +990,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         recipientEncryptionPublicKey: hex64('recipientEncryptionPublicKey').optional()
           .describe('The receiving wallet\'s encryption public key (64 hex); required with a recipient other than this wallet'),
         idempotencyKey: z.string().optional().describe('Dedupes retries'),
-      },
+      }),
     },
     run(async (args, extra) => {
       if (!config) throw new Error('local minting is not configured for this server instance');
@@ -1018,7 +1020,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         'factory\'s supply ledger drops. Built, proven and signed here, a sponsor pays; the factory ' +
         'has to be on the sponsor\'s contract list and burn on its circuit list. Names the token ' +
         'by its name and issuer: without issuerKey the token is one this wallet minted. ' + WAIT_HINT,
-      inputSchema: {
+      inputSchema: toolInput({
         contractAddress: hex64('contractAddress').describe('The token-factory deployment the token was minted on'),
         name: z.string().min(1).refine((s) => Buffer.byteLength(s, 'utf8') <= 32, 'name must be at most 32 UTF-8 bytes')
           .describe('Token name, at most 32 UTF-8 bytes'),
@@ -1028,7 +1030,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         ]).describe('Atoms to burn; a decimal string is exact'),
         issuerKey: hex64('issuerKey').optional().describe('The issuer of the token (64 hex, from mint_token); default this wallet\'s own issuer'),
         idempotencyKey: z.string().optional().describe('Dedupes retries'),
-      },
+      }),
     },
     run(async (args, extra) => {
       if (!config) throw new Error('local burning is not configured for this server instance');
@@ -1059,7 +1061,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         'bytes go to the server. The recipient needs nothing but its ' +
         'address. Needs sponsorTransfer in the grant and the type on the sponsor\'s list; an unshielded ' +
         'address also needs allowUnshieldedOffers on the grant. ' + RECEIPT_HINT + WAIT_HINT,
-      inputSchema: {
+      inputSchema: toolInput({
         tokenType: hex64('tokenType').optional()
           .describe('Raw token type (64 hex), what derive_token_type or mint_token returns; required for a shielded address, default NIGHT for an unshielded one'),
         amount: z.union([
@@ -1068,7 +1070,7 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         ]).describe('Atoms to send; a decimal string is exact'),
         to: z.string().min(16).describe('The recipient\'s address as its get_attester_identity shows it: shieldedAddress (mn_shield-addr_...) or nightAddress (mn_addr_...)'),
         idempotencyKey: z.string().optional().describe('Dedupes retries'),
-      },
+      }),
     },
     run(async (args, extra) => {
       if (!config) throw new Error('transfers are not configured for this server instance');
@@ -1137,14 +1139,14 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         'gets a secret derived from the seed for that package; the private state they return is kept once the call landed). The contract has to be sponsorable (its ' +
         'address and circuit on the sponsor\'s policy). The answer waits for the block; a call the chain refused ' +
         'gives its coins back. ' + WAIT_HINT,
-      inputSchema: {
+      inputSchema: toolInput({
         package: z.string().min(1).max(214).describe('The installed lineage package, for example @meridian/contract-m402'),
         contractAddress: hex64('contractAddress').describe('The deployment to call'),
         circuit: z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/, 'circuit must be a circuit name').describe('The circuit to call'),
         args: z.array(z.unknown()).max(32).optional().describe('Circuit arguments in order, with the tagged values described above'),
         payUnshielded: z.boolean().optional().describe('The circuit takes unshielded tokens from this wallet; implied by a $night argument'),
         idempotencyKey: z.string().optional().describe('Dedupes retries; an identical call without a new key returns the first job'),
-      },
+      }),
     },
     run(async (args, extra) => {
       if (!config) throw new Error('local building is not configured for this server instance');
@@ -1197,10 +1199,10 @@ export function registerTools(server: McpServer, client: NightgateClient, config
         'one cost (ledger). Free. With an agent grant of a direct instance: jobs by kind and ' +
         'status and the limits { jobsPerHour, jobsPerDay, classes }. Read it before a burst and ' +
         'after a 429 (the error carries retryAfterSeconds).',
-      inputSchema: {
+      inputSchema: toolInput({
         since: z.string().datetime().optional().describe('Agent grants only: ISO timestamp, start of the window; default 30 days back'),
         until: z.string().datetime().optional().describe('Agent grants only: ISO timestamp, end of the window'),
-      },
+      }),
     },
     run(async (args) => {
       if (!config?.token && !config?.username) throw new Error('get_usage needs a key: set ODATANO_ACCESS_KEY (an oda_... key from https://api.odatano.dev)');

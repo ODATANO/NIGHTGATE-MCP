@@ -58,6 +58,6 @@ next to it. The free state reads need `NIGHTGATE_PUBLIC_VERIFY=true` on an own
 instance that is reached without credentials. What an older server lacks per version:
 [CHANGELOG](CHANGELOG.md).
 
-Local building needs ONE `@midnight-ntwrk/ledger-v8` in the install
-(`npm ls @midnight-ntwrk/ledger-v8`). `expected instance of ...` means two:
+Local building needs ONE `@midnightntwrk/ledger-v9` in the install
+(`npm ls @midnightntwrk/ledger-v9`). `expected instance of ...` means two:
 `npm dedupe`.

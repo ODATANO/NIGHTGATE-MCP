@@ -30,14 +30,17 @@ wallet sign-in, a redeem code, or tADA over x402), then:
   "mcpServers": {
     "nightgate": {
       "command": "npx",
-      "args": ["-y", "@odatano/nightgate-mcp"],
+      "args": ["-y", "@odatano/nightgate-mcp@0.24.1"],
       "env": { "ODATANO_ACCESS_KEY": "oda_..." }
     }
   }
 }
 ```
 
-Claude Code: `claude mcp add nightgate --env ODATANO_ACCESS_KEY=oda_... -- npx -y @odatano/nightgate-mcp`
+Claude Code: `claude mcp add nightgate --env ODATANO_ACCESS_KEY=oda_... -- npx -y @odatano/nightgate-mcp@0.24.1`
+
+Pin the version: `npx` keeps a cached copy, so an unpinned name can start an
+older release.
 
 The hosted gateway is the default (Midnight preprod). The same key works for
 `@odatano/core-mcp` (Cardano). Node.js >= 20.

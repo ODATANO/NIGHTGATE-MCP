@@ -5,6 +5,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 The README says which NIGHTGATE the current version needs.
 
+## [0.24.1] - 2026-11-26
+
+Needs NIGHTGATE 0.47.0 and `@odatano/nightgate-tx` 0.26.0.
+
+### Fixed
+
+- A tool refuses an argument it does not take, where it dropped it. A former
+  argument names what replaced it: `compiledArtifactRef` on
+  `verify_attestation` fell back to `attestation-vault-32` before.
+- `anchor_document` with a content root returns `anchorTxId` next to
+  `anchorTxHash`.
+- docs/configuration.md checks `@midnightntwrk/ledger-v9`, the package the
+  install carries.
+
+### Changed
+
+- The README quick start pins the version for `npx`.
+- `@modelcontextprotocol/sdk` ^1.32.2.
+- `@odatano/nightgate-tx` 0.26.0, on midnight-js 5.0.3 under `@midnightntwrk`.
+
 ## [0.24.0] - 2026-11-24
 
 Needs NIGHTGATE 0.47.0 and `@odatano/nightgate-tx` 0.25.3.
