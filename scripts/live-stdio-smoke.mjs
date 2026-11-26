@@ -35,7 +35,7 @@ console.log('OK   spawned dist/index.js and completed the MCP handshake');
 const { tools } = await client.listTools();
 console.log(`OK   ${tools.length} tools discovered over stdio`);
 const byName = new Map(tools.map((t) => [t.name, t]));
-for (const required of ['verify_attestation', 'build_sponsorable_transaction', 'prove_document_integrity']) {
+for (const required of ['verify_attestation', 'build_sponsorable_transaction', 'submit_vault_call']) {
   if (!byName.has(required)) fail(`tool '${required}' missing from the stdio listing`);
 }
 
@@ -55,6 +55,7 @@ if (VAULT && process.env.ODATANO_ACCESS_URL) {
     name: 'verify_attestation',
     arguments: {
       contractAddress: VAULT,
+      attesterId: '0'.repeat(64),
       payloadHash: '0'.repeat(64),
       contractName: process.env.NIGHTGATE_VAULT_ARTIFACT || 'attestation-vault',
     },
