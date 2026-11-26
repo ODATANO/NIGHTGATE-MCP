@@ -5,6 +5,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 The README says which NIGHTGATE the current version needs.
 
+## [0.24.2] - 2026-11-26
+
+Needs NIGHTGATE 0.47.0 and `@odatano/nightgate-tx` 0.26.0.
+
+### Fixed
+
+- `engines.node` is `>=22.12`, the minimum of `@odatano/nightgate-tx`.
+  The README says the same.
+- The README badge names NIGHTGATE 0.47.0 and links to the repository.
+
+### Changed
+
+- `@types/node` ^22.
+
 ## [0.24.1] - 2026-11-26
 
 Needs NIGHTGATE 0.47.0 and `@odatano/nightgate-tx` 0.26.0.

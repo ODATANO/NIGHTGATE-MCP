@@ -8,7 +8,7 @@
 # @odatano/nightgate-mcp
 
 [![npm](https://img.shields.io/npm/v/@odatano/nightgate-mcp)](https://www.npmjs.com/package/@odatano/nightgate-mcp)
-[![NIGHTGATE](https://img.shields.io/badge/NIGHTGATE-%3E%3D%200.43.1-4b0082)](https://www.npmjs.com/package/@odatano/nightgate)
+[![NIGHTGATE](https://img.shields.io/badge/NIGHTGATE-%3E%3D%200.47.0-4b0082)](https://github.com/ODATANO/NIGHTGATE)
 [![MCP](https://img.shields.io/badge/MCP-server-2ea44f)](https://modelcontextprotocol.io/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-yellow)](LICENSE)
 
@@ -30,20 +30,20 @@ wallet sign-in, a redeem code, or tADA over x402), then:
   "mcpServers": {
     "nightgate": {
       "command": "npx",
-      "args": ["-y", "@odatano/nightgate-mcp@0.24.1"],
+      "args": ["-y", "@odatano/nightgate-mcp@0.24.2"],
       "env": { "ODATANO_ACCESS_KEY": "oda_..." }
     }
   }
 }
 ```
 
-Claude Code: `claude mcp add nightgate --env ODATANO_ACCESS_KEY=oda_... -- npx -y @odatano/nightgate-mcp@0.24.1`
+Claude Code: `claude mcp add nightgate --env ODATANO_ACCESS_KEY=oda_... -- npx -y @odatano/nightgate-mcp@0.24.2`
 
 Pin the version: `npx` keeps a cached copy, so an unpinned name can start an
 older release.
 
 The hosted gateway is the default (Midnight preprod). The same key works for
-`@odatano/core-mcp` (Cardano). Node.js >= 20.
+`@odatano/core-mcp` (Cardano). Node.js >= 22.12.
 
 That is all the setup. `anchor_document` with the hash of a document (`payloadHash`) anchors
 it in the shared sandbox vault and answers once it landed, with the free
