@@ -21,6 +21,9 @@ The first build downloads the prover keys and creates the seed file (see
 
 ## All tools
 
+A tool refuses an argument it does not take. An argument of an earlier release
+names what replaced it, for example `compiledArtifactRef is renamed to contractName`.
+
 | Tool | What it does |
 |---|---|
 | `verify_attestation`, `verify_predicate` | Check a record or a ZK claim against live contract state; absent = `verified: false`. Free |
@@ -103,7 +106,8 @@ A stage without both timestamps is left out.
 | `settleMs` | From the broadcast until the block is final |
 
 `anchor_document` with a content root returns the anchor's stages as
-`anchorTimings`.
+`anchorTimings`. Its `txId` and `txHash` are those of the content root,
+`anchorTxId` and `anchorTxHash` those of the anchor.
 
 ## Sandbox vaults
 
